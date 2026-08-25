@@ -1,0 +1,70 @@
+#pragma once
+#include "Buffer.h"
+#include "Channel.h"
+#include "EventLoop.h"
+#include "InetAddress.h"
+#include "Socket.h"
+#include "Timer.h"
+#include <atomic>
+#include <chrono>
+#include <functional>
+#include <memory>
+#include <mutex>
+#include <sys/syscall.h>
+class EventLoop;
+class Channel;
+class Connection;
+using spConnection = std::shared_ptr<Connection>;
+
+class Connection : public std::enable_shared_from_this<Connection> {
+private:
+  EventLoop *loop_;
+  std::unique_ptr<Socket> clientsock_;
+  std::unique_ptr<Channel> clientchannel_;
+  Buffer inputbuffer_;
+  Buffer outputbuffer_;
+  std::atomic_bool disconnect_;
+  Timestamp lastActiveTime_; //最近一次收到数据的时间
+  double idletimeout_ = 0.0; //秒；0=禁用（默认不启用空闲检测）
+
+  std::function<void(spConnection)> closecallback_;
+  std::function<void(spConnection)>
+      errorcallback_; // fd_发生了错误的回调函数，将回调TcpServer::errorconnection()。
+  std::function<void(spConnection, std::string &)>
+      onmessagecallback_; // 处理报文的回调函数，将回调TcpServer::onmessage()。
+  std::function<void(spConnection)>
+      sendcompletecallback_; // 发送数据完成后的回调函数，将回调TcpServer::sendcomplete()。
+
+  void
+  armIdleTimerInLoop(double seconds); // 在所属 loop 线程装一次性定时器并重装
+  bool idleExpired(double timeout) const; //空闲是否已超时
+public:
+  Connection(EventLoop *loop, std::unique_ptr<Socket> clientsock);
+  ~Connection();
+
+  int fd() const;
+  std::string ip() const;
+  uint16_t port() const;
+  void onmessage(); // 处理对端发送过来的消息。
+  void closecallback(); // TCP连接关闭（断开）的回调函数，供Channel回调。
+  void errorcallback(); // TCP连接错误的回调函数，供Channel回调。
+  void writecallback(); // 处理写事件的回调函数，供Channel回调。
+
+  void setclosecallback(
+      std::function<void(spConnection)> fn); // 设置关闭fd_的回调函数。
+  void seterrorcallback(
+      std::function<void(spConnection)> fn); // 设置fd_发生了错误的回调函数。
+  void setonmessagecallback(std::function<void(spConnection, std::string &)>
+                                fn); // 设置处理报文的回调函数。
+  void setsendcompletecallback(
+      std::function<void(spConnection)> fn); // 发送数据完成后的回调函数。
+
+  void send(const char *data, size_t size);
+  // 发送数据，如果当前线程是IO线程，直接调用此函数，如果是工作线程，将把此函数传给IO线程去执行。
+  // void sendinloop(const char *data,size_t size);
+  void sendinloop(std::shared_ptr<std::string> data);
+
+  void setIdleTimeout(double seconds);
+  void forceClose(); // 新增：线程安全地关闭连接（内部 queueinloop）
+  bool disconnected() const { return disconnect_.load(); }
+};

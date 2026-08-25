@@ -1,0 +1,145 @@
+syntax = "proto3";
+package im;
+
+// ========== 用户/认证 ==========
+ message RegisterRequest { 
+    string username = 1;
+     string password = 2; 
+     }
+ message RegisterResponse { bool success = 1; string message = 2; }
+
+ message LoginRequest { string username = 1; string password =2; }
+ message LoginResponse { bool success = 1; string message = 2; string token = 3; }
+
+ // ========== 好友 ==========
+ message AddFriendRequest { string user_id = 1; string friend_id = 2; }
+ message AddFriendResponse { bool success = 1; string message = 2; }
+
+ message GetFriendListRequest { string user_id = 1; }
+ message GetFriendListResponse {
+     bool success =1;
+     repeated FriendInfo friends = 2;
+ }
+ message FriendInfo { string user_id = 1; string username = 2; bool is_online = 3; }
+
+ // ========== 聊天消息 ==========
+ message ChatMessage {
+     string msg_id = 1;        // 全局唯一消息ID (可用 snowflake 或 UUID)
+     string from_user_id =2;
+     string from_username = 3;
+     string to_user_id = 4;    // 单聊时是对方user_id，群聊时是group_id
+     string content = 5;
+     int64 timestamp = 6;
+     int32 chat_type = 7;      // 0=单聊, 1=群聊
+     MessageStatus status = 8;
+ }
+
+ //新增ACK消息
+ message MessageAck{
+    string msg_id = 1;
+    string from_user_id = 2;    // 发 ACK 的人（接收方）
+    string to_user_id = 3;      // 收 ACK 的人（原始发送方）
+    MessageStatus status = 4;   // DELIVERED 或 READ
+    int64 timestamp = 5;
+ }
+ //1.3 新增 ACK 消息
+ message AckMessageRequest{MessageAck ack = 1;}
+ message AckMessageResponse{bool success = 1;}
+    //1.4 新增离线消息拉取
+message PullOfflienMessagesRequest{string user_id = 1;}
+message PullOfflienMessagesResponse{
+    bool success = 1;
+    repeated ChatMessage messages =2;
+}
+//当前 deliverLocal() 推送的是裸 ChatMessage 帧。
+//为了也能推送 ACK 通知给原始发送方，需要一个类型区分：
+message ServerPushEnvelope{
+    enum PayloadType{
+        CHAT_MESSAGE = 0;
+        DELIVERY_ACK = 1;
+        SYSTEM_NOTICE = 2;   // 新增：系统通知（如"密码已改，请重登"）
+    }
+    PayloadType type = 1;
+    bytes payload = 2;          //序列化后的ChatMessage或MessageAck
+}
+
+ message SendMessageRequest { ChatMessage msg = 1;string client_request_id = 2; }
+ message SendMessageResponse { bool success = 1; string message = 2; string msg_id = 3; }
+
+ // ========== 服务器间转发（Route Server用） ==========
+ message RouteQueryRequest { string user_id = 1; }
+ message RouteQueryResponse {
+     bool found= 1;
+     string server_id= 2;       // 如 "IM1"
+     string server_ip =3;
+     int32  server_port =4;
+ }
+
+ message RouteRegisterRequest { 
+    string user_id = 1;
+     string server_id =2;
+     string server_ip = 3;
+     int32 server_port = 4;
+      }
+ message RouteRegisterResponse { bool success = 1; }
+
+ message RouteUnregisterRequest { string user_id = 1; }
+ message RouteUnregisterResponse { bool success =1; }
+
+ // ========== 路由变更事件（Redis Pub/Sub 推送用） ==========
+   message RouteChangeEvent {
+       string user_id = 1;
+       bool   online  = 2;   // true=登录/上线, false=下线/注销
+       string server_id = 3;
+       string server_ip  = 4;
+       int32  server_port = 5;
+   }
+   
+ // ========== 服务器间消息转发 ==========
+ message ForwardMessageRequest { ChatMessage msg = 1; }
+ message ForwardMessageResponse { bool success =1 ; }
+
+
+//加入消息可靠机制
+enum MessageStatus{
+    SENDING = 0;    // 客户端已发送，等待服务端确认
+     SENT = 1;       // 服务端已接受
+     DELIVERED = 2;  // 已送达目标客户端（收到 ACK）
+     READ = 3;       // 目标客户端已读
+     FAILED = 4;     // 投递失败（超过最大重试次数）
+} 
+
+message PendingMessageRecord{
+    ChatMessage msg = 1;
+    int32 retry_count = 2;
+}
+
+
+ // ========== 系统通知（服务端主动推送） ==========
+ message SystemNotice {
+     string message = 1;   // 展示给用户的文案
+ }
+
+ // ========== 改密码 ==========
+ message ChangePasswordRequest {
+     string user_id = 1;      // 约定：username 即 user_id
+     string new_password = 2;
+ }
+ message ChangePasswordResponse {
+     bool success = 1;
+     string message = 2;
+ }
+
+ // ========== 用户数据变更事件（Redis Pub/Sub 广播用，跨节点） ==========
+ message UserChangedEvent {
+     enum Type {
+         PASSWORD_CHANGED = 0;
+         USER_BANNED = 1;
+         USER_DELETED = 2;
+         FRIEND_REMOVED = 3;
+     }
+     Type type = 1;
+     string user_id = 2;     // 受影响用户
+     string target_id = 3;   // 可选，如被删的好友 id
+     string reason = 4;      // 可选，踢下线原因文案
+ }
