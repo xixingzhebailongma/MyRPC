@@ -1,0 +1,124 @@
+ syntax = "proto3";
+  package auth;
+
+  // 设备类型。
+  // 注意：im.proto 里对应字段刻意用 int32 承载，ImServer 转发时做一次 cast，
+  // 这样两个 .proto 之间不产生 import 耦合。
+  enum DeviceType {
+    DEVICE_UNKNOWN = 0;
+    DEVICE_IOS     = 1;
+    DEVICE_ANDROID = 2;
+    DEVICE_WEB     = 3;
+    DEVICE_DESKTOP = 4;
+  }
+
+  // 一条会话的对外视图。
+  // 对应 Redis 里 auth:session:{sid} 这个 Hash，但刻意 *不含*
+  // access_token / refresh_token —— 那两个字段只在 Redis 内部冗余存储，
+  // 供 revokeSession 反查用，绝不通过这个结构外发。
+  message SessionInfo {
+    string     session_id         = 1;
+    string     user_id            = 2;
+    string     username           = 3;
+    string     device_id          = 4;
+    DeviceType device_type        = 5;
+    string     client_ip          = 6;
+    int64      created_at         = 7;   // 秒级 unix 时间戳
+    int64      refresh_expires_at = 8;   // 秒级 unix 时间戳
+  }
+
+  // ---------- Login：唯一签发令牌的入口 ----------
+  message LoginRequest {
+    string     username    = 1;
+    string     password    = 2;
+    string     device_id   = 3;
+    DeviceType device_type = 4;
+    string     client_ip   = 5;
+  }
+  message LoginResponse {
+    bool        success       = 1;
+    string      message       = 2;
+    string      access_token  = 3;
+    string      refresh_token = 4;
+    int32       expires_in    = 5;   // access_token 有效秒数
+    SessionInfo session       = 6;
+  }
+
+  // ---------- VerifyToken：校验 access token ----------
+  message VerifyTokenRequest {
+    string token = 1;
+  }
+  message VerifyTokenResponse {
+    bool        valid   = 1;
+    string      message = 2;
+    SessionInfo session = 3;
+  }
+
+  // ---------- ResolveTicket：长连接握手，一次性消费 ----------
+  message ResolveTicketRequest {
+    string ticket = 1;
+  }
+  message ResolveTicketResponse {
+    bool        valid   = 1;
+    string      message = 2;
+    SessionInfo session = 3;
+  }
+
+  // ---------- Refresh：续期，每次使用后轮换 ----------
+  message RefreshRequest {
+    string refresh_token = 1;
+  }
+  message RefreshResponse {
+    bool   success       = 1;
+    string message       = 2;
+    string access_token  = 3;   // 新的
+    string refresh_token = 4;   // 新的（旧的立即失效）
+    int32  expires_in    = 5;
+  }
+
+  // ---------- IssueTicket：用 access token 换一张 60 秒一次性握手票 ----------
+  message IssueTicketRequest {
+    string access_token = 1;
+  }
+  message IssueTicketResponse {
+    bool   success = 1;
+    string message = 2;
+    string ticket  = 3;
+  }
+
+  // ---------- Logout ----------
+  message LogoutRequest {
+    string access_token = 1;
+  }
+  message LogoutResponse {
+    bool   success = 1;
+    string message = 2;
+  }
+
+  // ---------- 多端会话管理 ----------
+  message ListSessionsRequest {
+    string user_id = 1;
+  }
+  message ListSessionsResponse {
+    bool                 success  = 1;
+    repeated SessionInfo sessions = 2;
+    string               message  = 3;
+  }
+
+  message KickSessionRequest {
+    string user_id    = 1;
+    string session_id = 2;
+  }
+  message KickSessionResponse {
+    bool   success = 1;
+    string message = 2;
+  }
+
+  message KickAllSessionsRequest {
+    string user_id = 1;
+  }
+  message KickAllSessionsResponse {
+    bool   success = 1;
+    int32  kicked  = 2;   // 实际吊销的会话数
+    string message = 3;
+  }

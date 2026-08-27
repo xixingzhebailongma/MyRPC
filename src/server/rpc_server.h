@@ -3,9 +3,9 @@
 #include "EventLoop.h"
 #include "TcpServer.h"
 #include "ThreadPool.h"
-#include "service_registry.h"
 #include "rpc_protocol.h"
 #include "service_manager.h"
+#include "service_registry.h"
 #include <functional>
 class ServiceRegistry; //前向声明,不需要#include
 
@@ -27,8 +27,11 @@ public:
 
   ServiceManager &serviceManager() { return serviceMgr_; }
   void setCloseConnectionCallback(std::function<void(spConnection)> cb);
+  // 新连接建立回调（在 onConnection 内触发），与 setCloseConnectionCallback
+  // 对称
+  void setNewConnectionCallback(std::function<void(spConnection)> cb);
   void setTimeoutCallback(std::function<void(EventLoop *)> cb);
-  void setPeriodTimer(double interval,std::function<void(EventLoop*)>cb);
+  void setPeriodTimer(double interval, std::function<void(EventLoop *)> cb);
   void setIdleTimeout(double seconds);
 
 private:
@@ -40,4 +43,5 @@ private:
   ServiceManager serviceMgr_;
   std::unique_ptr<ServiceRegistry> registry_;
   std::function<void(spConnection)> closeConnectionCb_;
+  std::function<void(spConnection)> newConnectionCb_;
 };

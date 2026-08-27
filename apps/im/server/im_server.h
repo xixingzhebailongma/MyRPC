@@ -2,17 +2,22 @@
 
 #include "Connection.h"
 #include "EventLoop.h"
-#include "lb_rpc_client.h"
-#include "user_dao.h"
 #include "im.pb.h" // 所有 IM 消息类型
+#include "lb_rpc_client.h"
 #include "message_store.h"
 #include "redis_subscriber.h"
 #include "route_cache.h"
 #include "rpc_channel_pool.h"
 #include "rpc_server.h"
+#include "user_dao.h"
 #include "user_manager.h"
+#include <chrono>
 #include <cstring>
 #include <google/protobuf/message.h>
+#include <memory>
+#include <mutex>
+#include <unordered_map>
+#include <utility>
 
 #include <string>
 
@@ -25,7 +30,9 @@ public:
   // etcd_endpoints: etcd 地址
   ImServer(const std::string &ip, int port, const std::string &server_id,
            const std::string &route_service, const std::string &etcd_endpoints,
-           const std::string &redis_ip, int redis_port, const DbConfig &db_cfg);
+           const std::string &redis_ip, int redis_port, const DbConfig &db_cfg,
+           const std::string &auth_service = "AuthService",
+           bool auth_enabled = true);
   void start();
   void stop();
 
@@ -70,10 +77,20 @@ private:
   // 工具：把一个 protobuf 消息打包成 [4字节LE长度][序列化数据] 的帧
   std::string packFrame(const google::protobuf::Message &msg);
   void onRetryCheck(EventLoop *loop);
+  // 长连接握手管理
+  void onNewConnection(spConnection conn);
+  void sweepHandshakes(EventLoop *loop);
+  void completeHandshake(int fd);
   void onRouteChange(const std::string &payload);
   //新增handler
   std::string handleChangePassword(spConnection conn,
                                    const std::string &request_body);
+  // 长连接握手 + Token 中转
+  std::string handleConnect(spConnection conn, const std::string &request_body);
+  std::string handleIssueTicket(spConnection conn,
+                                const std::string &request_body);
+  std::string handleRefresh(spConnection conn, const std::string &request_body);
+  std::string handleLogout(spConnection conn, const std::string &request_body);
   // 事件消费：收到用户数据变更事件后踢下线
   void onUserChanged(const std::string &payload);
   void kickOffline(const im::UserChangedEvent &ev);
@@ -85,8 +102,9 @@ private:
   UserManager user_manager_;
   MessageStore message_store_;
   UserDao user_dao_;
-  LbRpcClient route_client_;         //调用Route Server
-  RouteCache route_cache_;           // 本地路由缓存
+  LbRpcClient route_client_; //调用Route Server
+  LbRpcClient auth_client_;  //调用 Auth Server（无状态，轮询即可）
+  RouteCache route_cache_;   // 本地路由缓存
   RedisSubscriber route_subscriber_; // 订阅路由变更事件
   //到其它IM Server的连接池（自持锁，调用方无需手动加锁）
   RpcChannelPool server_channels_;
@@ -96,4 +114,13 @@ private:
   int port_;
   std::string redis_ip_;
   int redis_port_;
+  std::string auth_service_;
+  bool auth_enabled_;
+
+  // 长连接握手：fd -> (weak_ptr conn, 建立时刻)。超时未握手则 forceClose。
+  static constexpr int kHandshakeTimeoutSec = 10;
+  std::mutex handshakes_mutex_;
+  std::unordered_map<int, std::pair<std::weak_ptr<Connection>,
+                                    std::chrono::steady_clock::time_point>>
+      pending_handshakes_;
 };

@@ -2,10 +2,10 @@
 #include "Connection.h"
 #include "Logger.h"
 #include "TcpServer.h"
-#include "service_registry.h"
 #include "rpc_header.pb.h"
 #include "rpc_protocol.h"
 #include "service_manager.h"
+#include "service_registry.h"
 #include <cstdint>
 #include <string>
 
@@ -113,6 +113,8 @@ void RpcServer::onMessage(spConnection conn, std::string &message) {
 void RpcServer::onConnection(spConnection conn) {
   LOG_INFO("RpcServer: new connection from %s:%d", conn->ip().c_str(),
            conn->port());
+  if (newConnectionCb_)
+    newConnectionCb_(conn);
 }
 
 void RpcServer::enableRegistry(const std::string &etcdEndpoints,
@@ -126,6 +128,10 @@ void RpcServer::enableRegistry(const std::string &etcdEndpoints,
 void RpcServer::setCloseConnectionCallback(
     std::function<void(spConnection)> cb) {
   closeConnectionCb_ = std::move(cb);
+}
+
+void RpcServer::setNewConnectionCallback(std::function<void(spConnection)> cb) {
+  newConnectionCb_ = std::move(cb);
 }
 
 void RpcServer::setTimeoutCallback(std::function<void(EventLoop *)> cb) {

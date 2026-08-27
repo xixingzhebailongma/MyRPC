@@ -2,27 +2,33 @@
 #include "Connection.h"
 #include "EventLoop.h"
 #include "Logger.h"
-#include "user_dao.h"
+#include "auth.pb.h"
 #include "im.pb.h"
 #include "message_store.h"
 #include "rpc_channel.h"
+#include "user_dao.h"
 #include <chrono>
 #include <functional>
 #include <google/protobuf/message.h>
 #include <memory>
 #include <mutex>
+#include <stdexcept>
 #include <vector>
 ImServer::ImServer(const std::string &ip, int port,
                    const std::string &server_id,
                    const std::string &route_service,
                    const std::string &etcd_endpoints,
                    const std::string &redis_ip, int redis_port,
-                   const DbConfig &db_cfg)
+                   const DbConfig &db_cfg, const std::string &auth_service,
+                   bool auth_enabled)
     : rpc_server_(ip, port), message_store_(server_id),
       route_client_(etcd_endpoints, route_service,
                     std::make_shared<ConsistentHashBalancer>(150)),
+      auth_client_(etcd_endpoints, auth_service,
+                   std::make_shared<RoundRobinBalancer>()),
       server_id_(server_id), ip_(ip), port_(port), redis_ip_(redis_ip),
-      redis_port_(redis_port) {
+      redis_port_(redis_port), auth_service_(auth_service),
+      auth_enabled_(auth_enabled) {
   // 注册 4 个 conn-aware handler
   rpc_server_.serviceManager().registerMethod(
       "ImService", "Login",
@@ -93,6 +99,22 @@ ImServer::ImServer(const std::string &ip, int port,
       "ImService", "ChangePassword",
       std::bind(&ImServer::handleChangePassword, this, std::placeholders::_1,
                 std::placeholders::_2));
+  rpc_server_.serviceManager().registerMethod(
+      "ImService", "Connect",
+      std::bind(&ImServer::handleConnect, this, std::placeholders::_1,
+                std::placeholders::_2));
+  rpc_server_.serviceManager().registerMethod(
+      "ImService", "IssueTicket",
+      std::bind(&ImServer::handleIssueTicket, this, std::placeholders::_1,
+                std::placeholders::_2));
+  rpc_server_.serviceManager().registerMethod(
+      "ImService", "Refresh",
+      std::bind(&ImServer::handleRefresh, this, std::placeholders::_1,
+                std::placeholders::_2));
+  rpc_server_.serviceManager().registerMethod(
+      "ImService", "Logout",
+      std::bind(&ImServer::handleLogout, this, std::placeholders::_1,
+                std::placeholders::_2));
   //注册 1s 周期定时器，用于消息重试检查（timerfd 定时器，与 IO
   //负载无关，不会被饿死）
   rpc_server_.setPeriodTimer(
@@ -101,12 +123,21 @@ ImServer::ImServer(const std::string &ip, int port,
   rpc_server_.enableRegistry(etcd_endpoints, server_id_, ip_, port_);
   // 连接关闭时：注销 Route 路由 + 标记用户离线
   rpc_server_.setCloseConnectionCallback([this](spConnection conn) {
-    std::string user_id = user_manager_.getUserIdByFd(conn->fd());
-    if (!user_id.empty()) {
+    std::string user_id;
+    bool was_last = user_manager_.userOfflineByFd(conn->fd(), &user_id);
+    // 只有该用户在本节点的最后一条会话关闭时才注销 Route，
+    // 否则会误伤用户其它仍在线设备的路由。
+    if (was_last && !user_id.empty()) {
       unregisterUserFromRoute(user_id);
-      user_manager_.userOffline(user_id);
     }
   });
+  // 连接建立：登记到未握手表
+  rpc_server_.setNewConnectionCallback(
+      [this](spConnection conn) { this->onNewConnection(conn); });
+  // 握手超时扫描（独立 1s 定时器；底层 setPeriodicTimer
+  // 每次注册独立定时器，安全）
+  rpc_server_.setPeriodTimer(
+      1.0, [this](EventLoop *loop) { this->sweepHandshakes(loop); });
   // 订阅路由变更事件：上线→预暖缓存，下线→失效缓存
   route_subscriber_.start(
       redis_ip_, redis_port_, "im:route:events",
@@ -126,45 +157,74 @@ void ImServer::stop() {
 //面向客户端的RPC接口
 std::string ImServer::handleLogin(spConnection conn,
                                   const std::string &request_body) {
-  //解析请求
   im::LoginRequest req;
   im::LoginResponse resp;
   if (!req.ParseFromString(request_body)) {
     resp.set_success(false);
     resp.set_message("parse error");
-    std::string out;
-    resp.SerializeToString(&out);
-    return out;
-  }
-  // 1. 校验用户名密码（服务端 SHA2+盐 重算比对）
-  if (!user_dao_.verifyLogin(req.username(), req.password())) {
-    resp.set_success(false);
-    resp.set_message("invalid username or password");
-    std::string out;
-    resp.SerializeToString(&out);
-    return out;
+    return resp.SerializeAsString();
   }
 
-  // 2本地记录上线(简化username当user_id)
+  // 约定：username 即 user_id
   std::string user_id = req.username();
-  user_manager_.userOnline(user_id, req.username(), conn);
+  std::string session_id;
 
-  // 3.向Route Server注册路由 (复用registerUserOnline)
+  if (auth_enabled_) {
+    // 1. 委托 AuthServer：校验密码 + 签发 access/refresh
+    auth::LoginRequest areq;
+    areq.set_username(req.username());
+    areq.set_password(req.password());
+    areq.set_device_id(req.device_id());
+    areq.set_device_type(static_cast<auth::DeviceType>(req.device_type()));
+    areq.set_client_ip(conn->ip());
+
+    std::string resp_body;
+    int32_t err = 0;
+    if (!auth_client_.Call("Login", areq.SerializeAsString(), resp_body, err)) {
+      resp.set_success(false);
+      resp.set_message("auth service unavailable");
+      return resp.SerializeAsString();
+    }
+    auth::LoginResponse aresp;
+    if (!aresp.ParseFromString(resp_body) || !aresp.success()) {
+      resp.set_success(false);
+      resp.set_message(aresp.success() ? "auth response parse error"
+                                       : aresp.message());
+      return resp.SerializeAsString();
+    }
+    resp.set_access_token(aresp.access_token());
+    resp.set_refresh_token(aresp.refresh_token());
+    resp.set_expires_in(aresp.expires_in());
+    session_id = aresp.session().session_id();
+  } else {
+    // 旧路径：本地校验密码（--auth.enabled=false 的灰度回退）
+    if (!user_dao_.verifyLogin(req.username(), req.password())) {
+      resp.set_success(false);
+      resp.set_message("invalid username or password");
+      return resp.SerializeAsString();
+    }
+    resp.set_token(user_id + "_token");
+    session_id = "legacy:" + std::to_string(conn->fd());
+  }
+
+  // 2. 本地记录上线（多端会话）
+  user_manager_.userOnline(session_id, user_id, req.username(), req.device_id(),
+                           req.device_type(), conn);
+  // 登录成功即视为握手完成，把连接从未握手表移除（否则 10 秒后会被超时误杀）
+  completeHandshake(conn->fd());
+  // 3. 向 Route Server 注册路由
   bool ok = registerUserOnline(user_id);
 
-  //用户上线后，把之前的离线消息投递出去
+  // 4. 用户上线后投递离线消息
   auto offline_msgs = message_store_.fetchOfflineMessages(user_id);
   for (auto &msg : offline_msgs) {
     deliverLocal(msg);
   }
   message_store_.clearOfflineMessages(user_id);
-  // 4.返回
+
   resp.set_success(ok);
   resp.set_message(ok ? "login ok" : "route register failed");
-  resp.set_token(user_id + "_token");
-  std::string out;
-  resp.SerializeToString(&out);
-  return out;
+  return resp.SerializeAsString();
 }
 std::string ImServer::handleRegister(spConnection conn,
                                      const std::string &request_body) {
@@ -197,8 +257,15 @@ std::string ImServer::handleAddFriend(spConnection conn,
     resp.SerializeToString(&out);
     return out;
   }
+  // 鉴权：身份从连接推导，而非客户端自报的 user_id
+  std::string uid = user_manager_.getUserIdByFd(conn->fd());
+  if (uid.empty()) {
+    resp.set_success(false);
+    resp.set_message("unauthenticated");
+    return resp.SerializeAsString();
+  }
   std::string err;
-  bool ok = user_dao_.addFriend(req.user_id(), req.friend_id(), &err);
+  bool ok = user_dao_.addFriend(uid, req.friend_id(), &err);
   resp.set_success(ok);
   resp.set_message(ok ? "add friend ok" : err);
   std::string out;
@@ -217,8 +284,15 @@ std::string ImServer::handleChangePassword(spConnection conn,
     resp.SerializeToString(&out);
     return out;
   }
+  // 鉴权：只允许改自己的密码，身份从连接推导
+  std::string uid = user_manager_.getUserIdByFd(conn->fd());
+  if (uid.empty()) {
+    resp.set_success(false);
+    resp.set_message("unauthenticated");
+    return resp.SerializeAsString();
+  }
   std::string err;
-  bool ok = user_dao_.updatePassword(req.user_id(), req.new_password(), &err);
+  bool ok = user_dao_.updatePassword(uid, req.new_password(), &err);
   resp.set_success(ok);
   resp.set_message(ok ? "password changed" : err);
   std::string out;
@@ -236,8 +310,17 @@ std::string ImServer::handleSendMessage(spConnection conn,
     resp.SerializeToString(&out);
     return out;
   }
+  // 鉴权：发送者身份从连接推导，强制覆盖客户端自报的 from_user_id
+  std::string uid = user_manager_.getUserIdByFd(conn->fd());
+  if (uid.empty()) {
+    resp.set_success(false);
+    resp.set_message("unauthenticated");
+    return resp.SerializeAsString();
+  }
+
   //复制为可变对象
   ChatMessage msg = req.msg();
+  msg.set_from_user_id(uid); // 客户端自报的 from_user_id 一律忽略
 
   //真实 msg_id 始终由服务端生成（全局唯一：INCR 单调 + server_id 前缀）
   std::string real_msg_id = message_store_.generateMsgId();
@@ -305,9 +388,15 @@ std::string ImServer::handleGetFriendList(spConnection conn,
     resp.SerializeToString(&out);
     return out;
   }
+  // 鉴权：身份从连接推导
+  std::string uid = user_manager_.getUserIdByFd(conn->fd());
+  if (uid.empty()) {
+    resp.set_success(false);
+    return resp.SerializeAsString();
+  }
   resp.set_success(true);
   // 从 DB 查真实好友（username==user_id 约定不变）
-  auto friends = user_dao_.getFriendList(req.user_id());
+  auto friends = user_dao_.getFriendList(uid);
   for (const auto &fid : friends) {
     auto *info = resp.add_friends();
     info->set_user_id(fid);
@@ -395,11 +484,17 @@ ImServer::handlePullOfflineMessages(spConnection conn,
     resp.SerializeToString(&out);
     return out;
   }
+  // 鉴权：只能拉自己的离线消息，身份从连接推导
+  std::string uid = user_manager_.getUserIdByFd(conn->fd());
+  if (uid.empty()) {
+    resp.set_success(false);
+    return resp.SerializeAsString();
+  }
   //从Redis拉取该用户的离线消息
-  auto messages = message_store_.fetchOfflineMessages(req.user_id());
+  auto messages = message_store_.fetchOfflineMessages(uid);
 
   //拉完之后清除Redis 里的离线消息（已送达客户端）
-  message_store_.clearOfflineMessages(req.user_id());
+  message_store_.clearOfflineMessages(uid);
 
   //填充响应
   resp.set_success(true);
@@ -431,8 +526,8 @@ bool ImServer::routeMessage(const ChatMessage &msg) {
 }
 //本地投递 → 把 ChatMessage 推给目标连接
 bool ImServer::deliverLocal(const ChatMessage &msg) {
-  auto conn = user_manager_.getConnection(msg.to_user_id());
-  if (!conn) {
+  auto conns = user_manager_.getConnections(msg.to_user_id());
+  if (conns.empty()) {
     //用户不在线 → 存入离线队列，等用户上线后拉取
     return message_store_.storeOfflineMessage(msg.to_user_id(), msg);
   }
@@ -441,22 +536,28 @@ bool ImServer::deliverLocal(const ChatMessage &msg) {
   msg.SerializeToString(envelope.mutable_payload());
   // 打包成 [4字节LE长度][ChatMessage序列化] 帧
   std::string frame = packFrame(envelope);
-  conn->send(frame.data(), frame.size());
+  // 多端：每个在线设备都推一份
+  for (auto &conn : conns) {
+    conn->send(frame.data(), frame.size());
+  }
   return true;
 }
 //重载：推送 ACK 通知给原始发送方
 bool ImServer::deliverLocal(const MessageAck &ack) {
-  auto conn = user_manager_.getConnection(ack.to_user_id());
-  if (!conn) {
+  auto conns = user_manager_.getConnections(ack.to_user_id());
+  if (conns.empty()) {
     return false; //原始发送发不在线，无法推送
   }
   ServerPushEnvelope envelope;
   envelope.set_type(ServerPushEnvelope::DELIVERY_ACK);
   ack.SerializeToString(envelope.mutable_payload());
   std::string frame = packFrame(envelope);
-  conn->send(frame.data(), frame.size());
+  for (auto &conn : conns) {
+    conn->send(frame.data(), frame.size());
+  }
   return true;
 }
+
 //通用远程调用：复用连接池+RpcChannel::Call
 bool ImServer::callRemote(const RouteQueryResponse &route,
                           const std::string &method,
@@ -579,16 +680,17 @@ void ImServer::kickOffline(const im::UserChangedEvent &ev) {
     notice.set_message("账号状态已变更，请重新登录");
     break;
   }
-  auto conn = user_manager_.getConnection(ev.user_id());
-
-  if (conn) {
-    im::ServerPushEnvelope envelope;
-    envelope.set_type(im::ServerPushEnvelope::SYSTEM_NOTICE);
-    notice.SerializeToString(envelope.mutable_payload());
-    std::string frame = packFrame(envelope);
+  auto conns = user_manager_.getConnections(ev.user_id());
+  if (conns.empty()) {
+    return;
+  }
+  im::ServerPushEnvelope envelope;
+  envelope.set_type(im::ServerPushEnvelope::SYSTEM_NOTICE);
+  notice.SerializeToString(envelope.mutable_payload());
+  std::string frame = packFrame(envelope);
+  // 多端：每个在线设备都推一条系统通知，然后全部 forceClose
+  for (auto &conn : conns) {
     conn->send(frame.data(), frame.size());
-    // 2. 关连接。closecallback 会触发已有的关闭回调：
-    //    unregisterUserFromRoute(user_id) + user_manager_.userOffline(user_id)
     conn->forceClose();
   }
 }
@@ -627,4 +729,187 @@ void ImServer::onRetryCheck(EventLoop *loop) {
       message_store_.removePending(id);
     }
   }
+}
+
+// ---------- 长连接握手管理 ----------
+void ImServer::onNewConnection(spConnection conn) {
+  std::lock_guard<std::mutex> lock(handshakes_mutex_);
+  pending_handshakes_[conn->fd()] = std::make_pair(
+      std::weak_ptr<Connection>(conn), std::chrono::steady_clock::now());
+}
+
+void ImServer::completeHandshake(int fd) {
+  std::lock_guard<std::mutex> lock(handshakes_mutex_);
+  pending_handshakes_.erase(fd);
+}
+
+void ImServer::sweepHandshakes(EventLoop *loop) {
+  (void)loop;
+  auto now = std::chrono::steady_clock::now();
+  std::vector<std::shared_ptr<Connection>> to_close;
+  {
+    std::lock_guard<std::mutex> lock(handshakes_mutex_);
+    for (auto it = pending_handshakes_.begin();
+         it != pending_handshakes_.end();) {
+      auto conn = it->second.first.lock();
+      if (!conn) {
+        it = pending_handshakes_.erase(it); // 连接已死，顺手清掉
+        continue;
+      }
+      if (now - it->second.second >=
+          std::chrono::seconds(kHandshakeTimeoutSec)) {
+        to_close.push_back(conn);
+        it = pending_handshakes_.erase(it);
+      } else {
+        ++it;
+      }
+    }
+  }
+  // 释放锁后再 forceClose（内部 queueinloop，不阻塞）
+  for (auto &conn : to_close) {
+    conn->forceClose();
+  }
+}
+
+std::string ImServer::handleConnect(spConnection conn,
+                                    const std::string &request_body) {
+  im::ConnectRequest req;
+  im::ConnectResponse resp;
+  if (!req.ParseFromString(request_body)) {
+    resp.set_success(false);
+    resp.set_message("parse error");
+    return resp.SerializeAsString();
+  }
+
+  // 委托 AuthServer 消费一次性票据
+  auth::ResolveTicketRequest areq;
+  areq.set_ticket(req.ticket());
+  std::string resp_body;
+  int32_t err = 0;
+  if (!auth_client_.Call("ResolveTicket", areq.SerializeAsString(), resp_body,
+                         err)) {
+    resp.set_success(false);
+    resp.set_message("auth service unavailable");
+    return resp.SerializeAsString();
+  }
+  auth::ResolveTicketResponse aresp;
+  if (!aresp.ParseFromString(resp_body) || !aresp.valid()) {
+    resp.set_success(false);
+    resp.set_message(aresp.valid() ? "auth response parse error"
+                                   : aresp.message());
+    return resp.SerializeAsString();
+  }
+  const auth::SessionInfo &s = aresp.session();
+
+  // 绑定会话
+  user_manager_.userOnline(s.session_id(), s.user_id(), s.username(),
+                           s.device_id(), static_cast<int>(s.device_type()),
+                           conn);
+  bool ok = registerUserOnline(s.user_id());
+
+  // 投递离线消息
+  auto offline = message_store_.fetchOfflineMessages(s.user_id());
+  for (auto &m : offline) {
+    deliverLocal(m);
+  }
+  message_store_.clearOfflineMessages(s.user_id());
+
+  completeHandshake(conn->fd());
+
+  resp.set_success(ok);
+  resp.set_user_id(s.user_id());
+  resp.set_message(ok ? "connect ok" : "route register failed");
+  return resp.SerializeAsString();
+}
+
+std::string ImServer::handleIssueTicket(spConnection conn,
+                                        const std::string &request_body) {
+  (void)conn;
+  im::IssueTicketRequest req;
+  im::IssueTicketResponse resp;
+  if (!req.ParseFromString(request_body)) {
+    resp.set_success(false);
+    resp.set_message("parse error");
+    return resp.SerializeAsString();
+  }
+  auth::IssueTicketRequest areq;
+  areq.set_access_token(req.access_token());
+  std::string resp_body;
+  int32_t err = 0;
+  if (!auth_client_.Call("IssueTicket", areq.SerializeAsString(), resp_body,
+                         err)) {
+    resp.set_success(false);
+    resp.set_message("auth service unavailable");
+    return resp.SerializeAsString();
+  }
+  auth::IssueTicketResponse aresp;
+  if (!aresp.ParseFromString(resp_body)) {
+    resp.set_success(false);
+    resp.set_message("auth response parse error");
+    return resp.SerializeAsString();
+  }
+  resp.set_success(aresp.success());
+  resp.set_message(aresp.message());
+  resp.set_ticket(aresp.ticket());
+  return resp.SerializeAsString();
+}
+
+std::string ImServer::handleRefresh(spConnection conn,
+                                    const std::string &request_body) {
+  (void)conn;
+  im::RefreshRequest req;
+  im::RefreshResponse resp;
+  if (!req.ParseFromString(request_body)) {
+    resp.set_success(false);
+    resp.set_message("parse error");
+    return resp.SerializeAsString();
+  }
+  auth::RefreshRequest areq;
+  areq.set_refresh_token(req.refresh_token());
+  std::string resp_body;
+  int32_t err = 0;
+  if (!auth_client_.Call("Refresh", areq.SerializeAsString(), resp_body, err)) {
+    resp.set_success(false);
+    resp.set_message("auth service unavailable");
+    return resp.SerializeAsString();
+  }
+  auth::RefreshResponse aresp;
+  if (!aresp.ParseFromString(resp_body)) {
+    resp.set_success(false);
+    resp.set_message("auth response parse error");
+    return resp.SerializeAsString();
+  }
+  resp.set_success(aresp.success());
+  resp.set_message(aresp.message());
+  resp.set_access_token(aresp.access_token());
+  resp.set_refresh_token(aresp.refresh_token());
+  resp.set_expires_in(aresp.expires_in());
+  return resp.SerializeAsString();
+}
+
+std::string ImServer::handleLogout(spConnection conn,
+                                   const std::string &request_body) {
+  im::LogoutRequest req;
+  im::LogoutResponse resp;
+  if (!req.ParseFromString(request_body)) {
+    resp.set_success(false);
+    resp.set_message("parse error");
+    return resp.SerializeAsString();
+  }
+  auth::LogoutRequest areq;
+  areq.set_access_token(req.access_token());
+  std::string resp_body;
+  int32_t err = 0;
+  // 登出幂等：AuthServer 侧找不到 token 也返回成功
+  auth_client_.Call("Logout", areq.SerializeAsString(), resp_body, err);
+
+  // 本地解绑：这条连接从此不再是已认证状态，后续请求会被当作未认证拒绝。
+  // 不主动 forceClose —— 让框架正常发回响应，连接留着但已无身份。
+  std::string uid;
+  bool was_last = user_manager_.userOfflineByFd(conn->fd(), &uid);
+  if (was_last && !uid.empty()) {
+    unregisterUserFromRoute(uid);
+  }
+  resp.set_success(true);
+  return resp.SerializeAsString();
 }

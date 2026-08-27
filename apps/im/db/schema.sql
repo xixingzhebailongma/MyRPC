@@ -7,6 +7,7 @@ CREATE TABLE IF NOT EXISTS users (
     password_hash CHAR(64) NOT NULL, -- SHA2(...,256) 输出 64 位小写 hex
     salt VARCHAR(32) NOT NULL, -- 每用户随机盐（16 字节 → 32 hex）
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    status TINYINT NOT NULL DEFAULT 0,
     PRIMARY KEY (username)
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4;
 

@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <unordered_map>
 #include <vector>
 // 前向声明 hiredis C 类型，避免在头文件中暴露 hiredis.h
 struct redisContext;
@@ -27,11 +28,13 @@ public:
   bool hset(const std::string &key, const std::string &field,
             const std::string &value);
   std::string hget(const std::string &key, const std::string &field);
+  std::unordered_map<std::string, std::string> hgetall(const std::string &key);
 
   //去重与过期
   bool setnx(const std::string &key, const std::string &value);
   bool expire(const std::string &key, int seconds);
-
+  // 原子的"设值+设过期"：token key 绝不能出现无 TTL 的中间状态
+  bool setex(const std::string &key, const std::string &value, int seconds);
   // List操作(离线消息队列)
   bool lpush(const std::string &key, const std::string &value);
   std::vector<std::string> lrange(const std::string &key, int start, int stop);
@@ -44,6 +47,8 @@ public:
   std::vector<std::string> zrangebyscore(const std::string &key, double min,
                                          double max, int limit = 0);
   bool zrem(const std::string &key, const std::string &member);
+  // 按 score 区间批量删除成员，返回删除个数；出错返回 -1
+  int64_t zremrangebyscore(const std::string &key, double min, double max);
   // Pub/Sub发布（一次性，复用连接池）
   bool publish(const std::string &channel, const std::string &msg);
 
