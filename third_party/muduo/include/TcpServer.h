@@ -9,6 +9,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <openssl/ssl.h> // ← 新增：SSL_CTX / TLS_server_method
 #include <set>
 #include <unordered_map>
 
@@ -32,6 +33,10 @@ private:
   std::function<void(int)> removeconnectioncb_;
   double idletimeout_ = 0.0; // 秒；0=禁用（默认不启用空闲检测）
   std::atomic_bool stopped_{false};
+  // TLS 上下文：enableTls() 时创建，newconnection 时传给每个 Connection。
+  // 连接侧的 SSL 对象会内部 up_ref 它，所以这里可独立析构。
+  std::unique_ptr<SSL_CTX, decltype(&SSL_CTX_free)> tls_ctx_{nullptr,
+                                                             SSL_CTX_free};
 
 public:
   TcpServer(const std::string &ip, const uint16_t port, int threadnum = 4);
@@ -57,5 +62,8 @@ public:
   void setIdleTimeout(double seconds) { idletimeout_ = seconds; } // 0=禁用
   void setremoveconnectioncb(std::function<void(int)> fn);
 
+  void enableTls(
+      const std::string &cert,
+      const std::string &key); // 加载证书并启用接入 TLS（须 start() 前调用）
   spConnection getConnByFd(int fd);
 };

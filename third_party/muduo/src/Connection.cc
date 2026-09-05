@@ -4,7 +4,10 @@
 #include <chrono>
 #include <cstring>
 #include <memory>
-Connection::Connection(EventLoop *loop, std::unique_ptr<Socket> clientsock)
+#include <openssl/err.h> // ← 新增：ERR_get_error / ERR_error_string
+#include <openssl/ssl.h> // ← 新增
+Connection::Connection(EventLoop *loop, std::unique_ptr<Socket> clientsock,
+                       SSL_CTX *tls_ctx)
     : loop_(loop), clientsock_(std::move(clientsock)),
       clientchannel_(new Channel(loop_, clientsock_->fd())),
       disconnect_(false) {
@@ -15,8 +18,24 @@ Connection::Connection(EventLoop *loop, std::unique_ptr<Socket> clientsock)
   clientchannel_->seterrorcallback(std::bind(&Connection::errorcallback, this));
   clientchannel_->setwritecallback(std::bind(&Connection::writecallback, this));
   clientchannel_->useet(); // 客户端连上来的fd采用边缘触发。
+
+  // TLS 必须在 enablereading() 之前挂好：否则
+  // ClientHello 可能先被当明文读走。
+  if (tls_ctx != nullptr) {
+    ssl_.reset(SSL_new(tls_ctx));
+    if (!ssl_) {
+      LOG_ERROR("Connection: SSL_new failed for fd %d", clientsock_->fd());
+      disconnect_ = true;
+    } else {
+      tls_enabled_ = true;
+      SSL_set_fd(ssl_.get(), clientsock_->fd());
+      SSL_set_accept_state(ssl_.get());
+    }
+  }
+
   if (!clientchannel_->enablereading()) {
-    LOG_ERROR("Connection: failed to register read event for fd %d. Marking as "
+    LOG_ERROR("Connection: failed to register read "
+              "event for fd %d. Marking as "
               "disconnected.",
               clientsock_->fd());
     disconnect_ = true;
@@ -63,7 +82,66 @@ void Connection::setsendcompletecallback(std::function<void(spConnection)> fn) {
   sendcompletecallback_ = fn;
 }
 
+// 驱动非阻塞 TLS 握手。WANT_READ 等下次 EPOLLIN，WANT_WRITE 等 EPOLLOUT。
+void Connection::driveHandshake() {
+  if (handshake_done_)
+    return;
+  int r = SSL_accept(ssl_.get());
+  if (r == 1) {
+    handshake_done_ = true;
+    return;
+  }
+  int err = SSL_get_error(ssl_.get(), r);
+  if (err == SSL_ERROR_WANT_READ) {
+    return; // 等下一次 EPOLLIN
+  } else if (err == SSL_ERROR_WANT_WRITE) {
+    clientchannel_->enablewriting(); // 等 EPOLLOUT 再驱动
+    return;
+  }
+  LOG_ERROR("Connection: TLS handshake failed fd=%d: %s", fd(),
+            ERR_error_string(ERR_get_error(), nullptr));
+  errorcallback();
+}
+
 void Connection::onmessage() {
+  if (tls_enabled_) {
+    if (!handshake_done_) {
+      driveHandshake();
+      return;
+    }
+    // TLS 已握手：SSL_read 解密进输入缓冲，循环读到 WANT_READ（ET 必须读空）
+    char extrabuf[65536];
+    bool got_data = false;
+    while (true) {
+      int nread = SSL_read(ssl_.get(), extrabuf, sizeof(extrabuf));
+      if (nread > 0) {
+        inputbuffer_.append(extrabuf, static_cast<size_t>(nread));
+        got_data = true;
+        lastActiveTime_ = std::chrono::steady_clock::now();
+      } else {
+        int err = SSL_get_error(ssl_.get(), nread);
+        if (err == SSL_ERROR_WANT_READ) {
+          break; // 本轮读空
+        } else if (err == SSL_ERROR_WANT_WRITE) {
+          clientchannel_->enablewriting();
+          break;
+        } else if (err == SSL_ERROR_ZERO_RETURN) {
+          closecallback();
+          return;
+        } else {
+          LOG_ERROR("onmessage: SSL_read failed fd=%d: %s", fd(),
+                    ERR_error_string(ERR_get_error(), nullptr));
+          errorcallback();
+          return;
+        }
+      }
+    }
+    if (got_data)
+      onmessagecallback_(shared_from_this(), inputbuffer_);
+    return;
+  }
+
+  // 明文路径（原逻辑不变）
   int savedErrno = 0;
   bool got_data = false;
   while (true) {
@@ -110,14 +188,14 @@ void Connection::send(std::shared_ptr<std::string> message) {
     sendinloop(std::move(message));
   } else {
     std::weak_ptr<Connection> weak_self = shared_from_this();
-    loop_->queueinloop(
-        [weak_self,
-         message]() { // shared_ptr 按值捕获：只 +1 引用计数，不拷数据
-          auto self = weak_self.lock();
-          if (self) {
-            self->sendinloop(message);
-          }
-        });
+    loop_->queueinloop([weak_self,
+                        message]() { // shared_ptr 按值捕获：只 +1
+                                     // 引用计数，不拷数据
+      auto self = weak_self.lock();
+      if (self) {
+        self->sendinloop(message);
+      }
+    });
   }
 }
 void Connection::forceClose() {
@@ -134,15 +212,45 @@ void Connection::forceClose() {
 void Connection::sendinloop(std::shared_ptr<std::string> data) {
   outputbuffer_.append(data->data(), data->size());
   if (!clientchannel_->enablewriting()) {
-    LOG_ERROR(
-        "sendinloop: enablewriting() failed for fd %d, closing connection.",
-        fd());
+    LOG_ERROR("sendinloop: enablewriting() failed for "
+              "fd %d, closing connection.",
+              fd());
     closecallback();
     return;
   } // 注册写事件。
 }
 
 void Connection::writecallback() {
+  if (tls_enabled_) {
+    if (!handshake_done_) {
+      driveHandshake(); // EPOLLOUT 触发：继续握手
+      return;
+    }
+    while (outputbuffer_.readableBytes() > 0) {
+      int n = SSL_write(ssl_.get(), outputbuffer_.peek(),
+                        static_cast<int>(outputbuffer_.readableBytes()));
+      if (n > 0) {
+        outputbuffer_.retrieve(static_cast<size_t>(n)); // n = 消费的明文字节数
+      } else {
+        int err = SSL_get_error(ssl_.get(), n);
+        if (err == SSL_ERROR_WANT_WRITE || err == SSL_ERROR_WANT_READ) {
+          break; // 等下次 EPOLLOUT
+        }
+        LOG_ERROR("SSL_write failed fd=%d: %s", fd(),
+                  ERR_error_string(ERR_get_error(), nullptr));
+        closecallback();
+        return;
+      }
+    }
+    if (outputbuffer_.readableBytes() == 0) {
+      clientchannel_->disablewriting();
+      if (sendcompletecallback_)
+        sendcompletecallback_(shared_from_this());
+    }
+    return;
+  }
+
+  // 明文路径（原逻辑不变）
   while (outputbuffer_.readableBytes() > 0) {
     ssize_t writen =
         ::send(fd(), outputbuffer_.peek(), outputbuffer_.readableBytes(), 0);
@@ -151,12 +259,13 @@ void Connection::writecallback() {
     } else if (writen == -1 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
       break; // 内核缓冲区满了，等下次 EPOLLOUT
     } else {
-      // 真正的错误，关闭连接
       LOG_ERROR("send() failed for fd = %d:%s", fd(), strerror(errno));
       closecallback();
       break;
     }
   }
+
+  // 发送完成判断移到循环外，逻辑与 TLS 分支（第 244–250 行）保持一致
   if (outputbuffer_.readableBytes() == 0) {
     clientchannel_->disablewriting();
     if (sendcompletecallback_) {
@@ -184,8 +293,7 @@ void Connection::armIdleTimerInLoop(double seconds) {
       return;
     if (self->idleExpired(seconds)) {
       LOG_INFO("Connection(fd=%d) idle %.1fs, closing.", self->fd(), seconds);
-      self->closecallback(); // 完整拆除：摘 channel、置 disconnect_、回调
-                             // TcpServer::closeconnection
+      self->closecallback();
     } else {
       self->armIdleTimerInLoop(seconds); // 仍活跃，重装
     }

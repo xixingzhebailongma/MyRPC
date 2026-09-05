@@ -22,6 +22,8 @@ int main(int argc, char *argv[]) {
   std::string im_service = "ImService";
   std::string auth_service = "AuthService";
   std::string shared_secret = "";
+  std::string tls_cert = "";
+  std::string tls_key = "";
 
   for (int i = 1; i < argc; ++i) {
     std::string arg = argv[i];
@@ -43,12 +45,20 @@ int main(int argc, char *argv[]) {
       auth_service = arg.substr(15);
     } else if (arg.rfind("--shared.secret=", 0) == 0) {
       shared_secret = arg.substr(16);
+    } else if (arg.rfind("--tls.cert=", 0) == 0) {
+      tls_cert = arg.substr(11);
+    } else if (arg.rfind("--tls.key=", 0) == 0) {
+      tls_key = arg.substr(10);
     }
   }
 
   GatewayServer gw(client_ip, static_cast<uint16_t>(client_port), rpc_ip,
                    static_cast<uint16_t>(rpc_port), gateway_id, etcd_endpoints,
                    im_service, auth_service, shared_secret);
+  // 两个都给才启用 TLS（enableTls 里也会对证书/私钥做校验，失败回退明文）
+  if (!tls_cert.empty() && !tls_key.empty()) {
+    gw.enableClientTls(tls_cert, tls_key);
+  }
   LOG_INFO("Gateway %s: client=%s:%d rpc=%s:%d", gateway_id.c_str(),
            client_ip.c_str(), client_port, rpc_ip.c_str(), rpc_port);
 

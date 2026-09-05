@@ -4,12 +4,30 @@
 #include <cerrno>
 #include <chrono>
 #include <cstring>
+#include <fcntl.h>
 #include <netinet/in.h>
+#include <openssl/err.h>
+#include <openssl/ssl.h>
+#include <poll.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
 ImClientConn::ImClientConn() = default;
 ImClientConn::~ImClientConn() { close(); }
+
+void ImClientConn::enableTls(const std::string &ca_path, bool insecure) {
+  tls_ = true;
+  tls_ca_ = ca_path;
+  tls_insecure_ = insecure;
+}
+
+// 设 fd 为非阻塞（TLS 数据阶段配合 poll 使用）
+static bool setNonblocking(int fd) {
+  int flags = fcntl(fd, F_GETFL, 0);
+  if (flags < 0)
+    return false;
+  return fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0;
+}
 
 bool ImClientConn::connect(const std::string &ip, int port) {
   // 先用局部 fd，连接成功后再发布到 sockfd_，
@@ -28,6 +46,47 @@ bool ImClientConn::connect(const std::string &ip, int port) {
     ::close(fd);
     return false;
   }
+
+  // TLS：阻塞式握手（此刻还没起 readLoop，无并发，可以阻塞）
+  if (tls_) {
+    tls_ctx_.reset(SSL_CTX_new(TLS_client_method()));
+    if (!tls_ctx_) {
+      ::close(fd);
+      return false;
+    }
+    if (tls_insecure_) {
+      SSL_CTX_set_verify(tls_ctx_.get(), SSL_VERIFY_NONE, nullptr);
+    } else {
+      SSL_CTX_set_verify(tls_ctx_.get(), SSL_VERIFY_PEER, nullptr);
+      if (SSL_CTX_load_verify_locations(tls_ctx_.get(), tls_ca_.c_str(),
+                                        nullptr) != 1) {
+        ::close(fd);
+        return false;
+      }
+    }
+    ssl_.reset(SSL_new(tls_ctx_.get()));
+    if (!ssl_) {
+      ::close(fd);
+      return false;
+    }
+    SSL_set_fd(ssl_.get(), fd);
+    if (!tls_insecure_) {
+      // 主机名/IP 校验：ip 是 "127.0.0.1"，会匹配证书里的 IP SAN
+      SSL_set1_host(ssl_.get(), ip.c_str());
+    }
+    if (SSL_connect(ssl_.get()) != 1) {
+      ::close(fd);
+      return false;
+    }
+    // 握手完成后数据阶段改非阻塞：让 ssl_mutex_ 只在每次 SSL_ 调用瞬间持有。
+    SSL_set_mode(ssl_.get(), SSL_MODE_ENABLE_PARTIAL_WRITE |
+                                 SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER);
+    if (!setNonblocking(fd)) {
+      ::close(fd);
+      return false;
+    }
+  }
+
   {
     std::lock_guard<std::mutex> lock(mutex_);
     closed_ = false; // 支持 close() 后重连
@@ -38,20 +97,40 @@ bool ImClientConn::connect(const std::string &ip, int port) {
   return true;
 }
 
+// 等 fd 就绪；close() 通过 running_ 置位 + shutdown 打断。
+bool ImClientConn::waitFd(int fd, short events) {
+  while (running_.load()) {
+    struct pollfd p {
+      fd, events, 0
+    };
+    int r = ::poll(&p, 1, 50); // 50ms 超时，及时响应 running_ 置位
+    if (r > 0)
+      return true;
+    if (r < 0) {
+      if (errno == EINTR)
+        continue;
+      return false;
+    }
+    // r == 0：超时，继续循环检查 running_
+  }
+  return false;
+}
+
 void ImClientConn::close() {
   running_.store(false);
   int fd = sockfd_.load();
-  // 先 shutdown 但不 close：既解除 readLoop 阻塞的 recv、中断在途的 send，
-  // 又保持 fd 号有效。若在这里就 close，readLoop 可能还阻塞在 ::recv(fd) 里，
-  // 该 fd 号会立刻被别处 socket()/open() 复用，收帧线程就读到别人的 fd 了。
+  // 先 shutdown 但不 close：既解除 readLoop 阻塞、中断在途 send，
+  // 又保持 fd 号有效。若在这里就 close，readLoop 可能还阻塞在该 fd 上，
+  // 该 fd 号会立刻被别处复用，收帧线程就读到别人的 fd 了。
   if (fd >= 0)
     ::shutdown(fd, SHUT_RDWR);
   if (thread_.joinable())
-    thread_.join(); // 等 readLoop 真正退出，此后没人再碰这个 fd
+    thread_.join(); // 等 readLoop 真正退出，此后没人再碰 ssl_ 的读侧
   {
-    // 再等在途的 sendAll 结束，才真正回收 fd。
+    // 再等在途的 sendAll 结束，才真正回收 fd 与 ssl_。
     std::lock_guard<std::mutex> lock(send_mutex_);
     if (sockfd_.load() >= 0) {
+      ssl_.reset(); // SSL_free（此刻无并发 SSL 读写）
       ::close(fd);
       sockfd_.store(-1);
     }
@@ -60,43 +139,100 @@ void ImClientConn::close() {
 
 // 前提：调用前必须已持有 send_mutex_。
 bool ImClientConn::sendAll(const char *data, size_t n) {
-  // 快照 fd 是安全的：close() 里真正的 ::close 也在 send_mutex_ 保护下，
-  // 不会在本函数执行期间发生，所以快照到的 fd 号不会变成被复用的新 fd。
   int fd = sockfd_.load();
   if (fd < 0)
     return false;
+
+  if (!tls_) {
+    size_t sent = 0;
+    while (sent < n) {
+      ssize_t r = ::send(fd, data + sent, n - sent, MSG_NOSIGNAL);
+      if (r < 0) {
+        if (errno == EINTR)
+          continue;
+        return false;
+      }
+      if (r == 0)
+        return false;
+      sent += static_cast<size_t>(r);
+    }
+    return true;
+  }
+
+  // TLS：非阻塞 SSL_write + poll。err 必须在锁内取（SSL_get_error 依赖
+  // 上一条对同一 SSL* 的操作，不能在解锁后被别的线程覆盖）。
   size_t sent = 0;
-  while (sent < n) {
-    ssize_t r = ::send(fd, data + sent, n - sent, MSG_NOSIGNAL); // 不要 SIGPIPE
-    if (r < 0) {
-      if (errno == EINTR)
-        continue;
+  while (sent < n && running_.load()) {
+    int r = 0, err = SSL_ERROR_NONE;
+    {
+      std::lock_guard<std::mutex> lk(ssl_mutex_);
+      r = SSL_write(ssl_.get(), data + sent, static_cast<int>(n - sent));
+      if (r <= 0)
+        err = SSL_get_error(ssl_.get(), r);
+    }
+    if (r > 0) {
+      sent += static_cast<size_t>(r);
+      continue;
+    }
+    if (err == SSL_ERROR_WANT_WRITE) {
+      if (!waitFd(fd, POLLOUT))
+        return false;
+    } else if (err == SSL_ERROR_WANT_READ) {
+      if (!waitFd(fd, POLLIN))
+        return false;
+    } else {
       return false;
     }
-    if (r == 0)
-      return false;
-    sent += static_cast<size_t>(r);
   }
-  return true;
+  return sent == n;
 }
 
 bool ImClientConn::readFull(char *buf, size_t n) {
   int fd = sockfd_.load();
   if (fd < 0)
     return false;
-  size_t got = 0;
-  while (got < n) {
-    ssize_t r = ::recv(fd, buf + got, n - got, 0);
-    if (r < 0) {
-      if (errno == EINTR)
-        continue;
-      return false;
+
+  if (!tls_) {
+    size_t got = 0;
+    while (got < n) {
+      ssize_t r = ::recv(fd, buf + got, n - got, 0);
+      if (r < 0) {
+        if (errno == EINTR)
+          continue;
+        return false;
+      }
+      if (r == 0)
+        return false;
+      got += static_cast<size_t>(r);
     }
-    if (r == 0)
-      return false;
-    got += static_cast<size_t>(r);
+    return true;
   }
-  return true;
+
+  // TLS：非阻塞 SSL_read + poll
+  size_t got = 0;
+  while (got < n && running_.load()) {
+    int r = 0, err = SSL_ERROR_NONE;
+    {
+      std::lock_guard<std::mutex> lk(ssl_mutex_);
+      r = SSL_read(ssl_.get(), buf + got, static_cast<int>(n - got));
+      if (r <= 0)
+        err = SSL_get_error(ssl_.get(), r);
+    }
+    if (r > 0) {
+      got += static_cast<size_t>(r);
+      continue;
+    }
+    if (err == SSL_ERROR_WANT_READ) {
+      if (!waitFd(fd, POLLIN))
+        return false;
+    } else if (err == SSL_ERROR_WANT_WRITE) {
+      if (!waitFd(fd, POLLOUT))
+        return false;
+    } else {
+      return false; // 含 SSL_ERROR_ZERO_RETURN：对端关闭
+    }
+  }
+  return got == n;
 }
 
 void ImClientConn::readLoop() {
