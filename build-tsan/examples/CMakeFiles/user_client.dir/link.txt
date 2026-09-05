@@ -1,0 +1,1 @@
+/usr/bin/c++ -fsanitize=thread -g -O1 -g -O0 CMakeFiles/user_client.dir/user_client.cc.o CMakeFiles/user_client.dir/user.pb.cc.o -o user_client  ../src/client/librpc_client.a ../src/protocol/libprotocol.a /usr/lib/x86_64-linux-gnu/libprotobuf.so ../src/logger/liblogger.a 

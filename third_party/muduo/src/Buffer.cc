@@ -1,29 +1,74 @@
 #include "../include/Buffer.h"
-Buffer::Buffer() = default;
+#include <algorithm>
+#include <errno.h>
+#include <sys/uio.h>
 
-Buffer::~Buffer() = default;
+Buffer::Buffer()
+    : buffer_(kCheapPrepend + kInitialSize), readerIndex_(kCheapPrepend),
+      writerIndex_(kCheapPrepend) {}
 
-void Buffer::append(const char *data, size_t size) {
-  buf_.append(data,size);
+void Buffer::retrieve(size_t len) {
+  if (len < readableBytes()) {
+    readerIndex_ += len;
+  } else {
+    retrieveAll();
+  }
 }
 
-void Buffer::erase(size_t pos, size_t nn) { buf_.erase(pos, nn); }
+void Buffer::retrieveAll() {
+  readerIndex_ = kCheapPrepend;
+  writerIndex_ = kCheapPrepend;
+}
 
-size_t Buffer::size() { return buf_.size(); }
+std::string Buffer::retrieveAsString(size_t len) {
+  std::string result(peek(), len);
+  retrieve(len);
+  return result;
+}
 
-const char *Buffer::data() { return buf_.data(); }
+void Buffer::append(const char *data, size_t len) {
+  ensureWritableBytes(len);
+  std::copy(data, data + len, beginWrite());
+  hasWritten(len);
+}
 
-void Buffer::clear() { buf_.clear(); }
+void Buffer::ensureWritableBytes(size_t len) {
+  if (writableBytes() < len) {
+    makeSpace(len);
+  }
+}
 
-bool Buffer::pickmessage(std::string &ss) {
-  if (buf_.size() == 0)
-    return false;
-  size_t len;
-  memcpy(&len, buf_.data(), 4);
-  if (buf_.size() < len + 4)
-    return false; // 如果buf_中的数据量小于报文头部，说明buf_中的报文内容不完整。
+void Buffer::makeSpace(size_t len) {
+  if (writableBytes() + prependableBytes() < len + kCheapPrepend) {
+    // 前端预留区也不够，直接扩容到足够容纳新数据
+    buffer_.resize(writerIndex_ + len);
+  } else {
+    // 把可读区整体搬到 kCheapPrepend 处，腾出尾部空间
+    size_t readable = readableBytes();
+    std::copy(begin() + readerIndex_, begin() + writerIndex_,
+              begin() + kCheapPrepend);
+    readerIndex_ = kCheapPrepend;
+    writerIndex_ = readerIndex_ + readable;
+  }
+}
 
-  ss = buf_.substr(4, len); // 从buf_中获取一个报文。
-  buf_.erase(0, len + 4);
-  return true;
+ssize_t Buffer::readFd(int fd, int *savedErrno) {
+  char extrabuf[65536];
+  struct iovec vec[2];
+  const size_t writable = writableBytes();
+  vec[0].iov_base = begin() + writerIndex_;
+  vec[0].iov_len = writable;
+  vec[1].iov_base = extrabuf;
+  vec[1].iov_len = sizeof(extrabuf);
+
+  const ssize_t n = ::readv(fd, vec, 2);
+  if (n < 0) {
+    *savedErrno = errno;
+  } else if (static_cast<size_t>(n) <= writable) {
+    writerIndex_ += n;
+  } else {
+    writerIndex_ = buffer_.size();
+    append(extrabuf, n - writable);
+  }
+  return n;
 }

@@ -1,0 +1,1 @@
+/usr/bin/c++ -fsanitize=thread -g -O1 -g -O0 CMakeFiles/test_rpc_channel_frame.dir/test_rpc_channel_frame.cc.o -o test_rpc_channel_frame  ../src/client/librpc_client.a ../src/protocol/libprotocol.a /usr/lib/x86_64-linux-gnu/libprotobuf.so ../src/logger/liblogger.a 

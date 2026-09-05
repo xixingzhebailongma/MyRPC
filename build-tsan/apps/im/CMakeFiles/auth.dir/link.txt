@@ -1,0 +1,2 @@
+/usr/bin/ar qc libauth.a CMakeFiles/auth.dir/auth/session_store.cc.o CMakeFiles/auth.dir/auth/auth_server.cc.o
+/usr/bin/ranlib libauth.a

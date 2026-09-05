@@ -1,0 +1,2 @@
+/usr/bin/ar qc libauth_proto.a CMakeFiles/auth_proto.dir/auth.pb.cc.o
+/usr/bin/ranlib libauth_proto.a

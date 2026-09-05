@@ -48,7 +48,9 @@ public:
   bool issueTicket(const std::string &access_token, std::string *out_ticket);
 
   // 消费握手票：GET → 立即 DEL（一次性）→ 返回 session。
-  bool resolveTicket(const std::string &ticket, auth::SessionInfo *out);
+  // gateway_id / conn_id：把票绑定到具体连接（记录审计，防重放加固）。
+  bool resolveTicket(const std::string &ticket, const std::string &gateway_id,
+                     uint64_t conn_id, auth::SessionInfo *out);
 
   // 用 refresh token 续期并轮换：旧 at/rt 立即失效，返回新 at/rt。
   bool refresh(const std::string &refresh_token, auth::RefreshResponse *resp);
@@ -69,7 +71,6 @@ public:
   int revokeAllSessions(const std::string &user_id);
 
 private:
-
   // Redis key 拼装（全部收敛在此，避免魔法字符串散落各处）。
   std::string sessionKey(const std::string &sid) const; // "auth:session:" + sid
   std::string accessKey(const std::string &at) const;   // "auth:access:"  + at

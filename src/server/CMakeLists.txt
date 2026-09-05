@@ -1,5 +1,6 @@
 add_library(rpc_server STATIC
     rpc_server.cc
+    idempotency_lru.cc
 )
 
 target_include_directories(rpc_server

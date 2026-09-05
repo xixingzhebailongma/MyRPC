@@ -1,0 +1,2 @@
+/usr/bin/ar qc librpc_server.a CMakeFiles/rpc_server.dir/rpc_server.cc.o
+/usr/bin/ranlib librpc_server.a

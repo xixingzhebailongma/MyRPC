@@ -151,7 +151,7 @@ void TcpServer::seterrorconnectioncb(std::function<void(spConnection)> fn) {
 }
 
 void TcpServer::setonmessagecb(
-    std::function<void(spConnection, std::string &message)> fn) {
+    std::function<void(spConnection, Buffer &message)> fn) {
   onmessagecb_ = fn;
 }
 
@@ -197,7 +197,7 @@ spConnection TcpServer::getConnByFd(int fd) {
   return nullptr;
 }
 
-void TcpServer::onmessage(spConnection conn, std::string &message) {
+void TcpServer::onmessage(spConnection conn, Buffer &message) {
   if (onmessagecb_)
     onmessagecb_(conn, message);
 }

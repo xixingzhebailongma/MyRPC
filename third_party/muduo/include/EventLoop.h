@@ -26,7 +26,7 @@ private:
   std::unique_ptr<TimerQueue> timerqueue_;  // 在 ep_ 之后：析构时先于 ep_（逆向析构）
   pid_t threadid_;
   std::queue<std::function<void()>> taskqueue_;
-  std::mutex mutex_;
+  std::mutex mutex_;    // 保护 taskqueue_ 的互斥锁
   std::mutex mmutex_; // 保护conns_的互斥锁。
   int wakeupfd_;
   std::unique_ptr<Channel> wakechannel_;

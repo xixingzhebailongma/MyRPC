@@ -1,0 +1,15 @@
+[2026-08-27 23:17:47.581] [238182] [INFO] /home/kai/rpc/MyRPC/third_party/muduo/src/ThreadPool.cc:7 - create IO thread(238182).
+[2026-08-27 23:17:47.581] [238184] [INFO] /home/kai/rpc/MyRPC/third_party/muduo/src/ThreadPool.cc:7 - create IO thread(238184).
+[2026-08-27 23:17:47.581] [238185] [INFO] /home/kai/rpc/MyRPC/third_party/muduo/src/ThreadPool.cc:7 - create IO thread(238185).
+[2026-08-27 23:17:47.581] [238183] [INFO] /home/kai/rpc/MyRPC/third_party/muduo/src/ThreadPool.cc:7 - create IO thread(238183).
+[2026-08-27 23:17:47.581] [238186] [INFO] /home/kai/rpc/MyRPC/third_party/muduo/src/ThreadPool.cc:7 - create WORK thread(238186).
+[2026-08-27 23:17:47.581] [238187] [INFO] /home/kai/rpc/MyRPC/third_party/muduo/src/ThreadPool.cc:7 - create WORK thread(238187).
+[2026-08-27 23:17:47.581] [238188] [INFO] /home/kai/rpc/MyRPC/third_party/muduo/src/ThreadPool.cc:7 - create WORK thread(238188).
+[2026-08-27 23:17:47.581] [238189] [INFO] /home/kai/rpc/MyRPC/third_party/muduo/src/ThreadPool.cc:7 - create WORK thread(238189).
+[2026-08-27 23:17:47.581] [238192] [INFO] /home/kai/rpc/MyRPC/third_party/muduo/src/ThreadPool.cc:7 - create WORK thread(238192).
+[2026-08-27 23:17:47.581] [238191] [INFO] /home/kai/rpc/MyRPC/third_party/muduo/src/ThreadPool.cc:7 - create WORK thread(238191).
+[2026-08-27 23:17:47.581] [238193] [INFO] /home/kai/rpc/MyRPC/third_party/muduo/src/ThreadPool.cc:7 - create WORK thread(238193).
+[2026-08-27 23:17:47.581] [238180] [INFO] /home/kai/rpc/MyRPC/examples/user_server.cc:38 - RPC Server started on 0.0.0.0:8888
+[2026-08-27 23:17:47.581] [238190] [INFO] /home/kai/rpc/MyRPC/third_party/muduo/src/ThreadPool.cc:7 - create WORK thread(238190).
+[2026-08-27 23:17:49.058] [238180] [INFO] /home/kai/rpc/MyRPC/src/server/rpc_server.cc:124 - RpcServer: new connection from 127.0.0.1:52306
+[2026-08-27 23:17:49.058] [238182] [INFO] /home/kai/rpc/MyRPC/src/server/rpc_server.cc:25 - RpcServer: connection closed 127.0.0.1:52306

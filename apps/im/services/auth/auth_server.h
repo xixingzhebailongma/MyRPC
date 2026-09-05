@@ -22,6 +22,7 @@ public:
 private:
   // 非 conn-aware handler（签名：std::string(const std::string&)）
   std::string handleLogin(const std::string &request_body);
+  std::string handleRegister(const std::string &request_body);
   std::string handleVerifyToken(const std::string &request_body);
   std::string handleRefresh(const std::string &request_body);
   std::string handleLogout(const std::string &request_body);

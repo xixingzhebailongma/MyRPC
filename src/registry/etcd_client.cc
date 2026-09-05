@@ -68,18 +68,7 @@ void EtcdClient::init(const EtcdConfig &cfg) {
   cfg_ = cfg;
   const std::string &url = cfg_.endpoints;
   const std::string &lb = cfg_.load_balancer;
-  if (!cfg_.ca.empty()) {
-    // TLS：ca/cert/privkey/target_name_override + load_balancer
-    client_.reset(new etcd::SyncClient(url, cfg_.ca, cfg_.cert, cfg_.privkey,
-                                       cfg_.target_name_override, lb));
-  } else if (!cfg_.username.empty()) {
-    // 用户名密码认证
-    client_.reset(new etcd::SyncClient(url, cfg_.username, cfg_.password,
-                                       cfg_.auth_token_ttl, lb));
-  } else {
-    // 仅 endpoints + 负载均衡策略
-    client_.reset(new etcd::SyncClient(url, lb));
-  }
+  client_.reset(new etcd::SyncClient(url, lb));
 
   // 启动后台健康监控线程
   healthRunning_ = true;

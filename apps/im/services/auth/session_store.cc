@@ -52,6 +52,25 @@ std::string generateToken(int hex_len) {
   }
   return out;
 }
+// ---------- createSession 的原子写 Lua 脚本 ----------
+// KEYS[1]=session hash, KEYS[2]=access key, KEYS[3]=refresh key,
+// KEYS[4]=dev 索引,  KEYS[5]=all 索引
+// ARGV[1..14] 布局见 createSession 里 args 向量（必须一一对应）
+const char *kCreateSessionScript = R"lua(
+  redis.call('HSET', KEYS[1],
+    'session_id', ARGV[1], 'user_id', ARGV[2], 'username', ARGV[3],
+    'device_id', ARGV[4], 'device_type', ARGV[5], 'client_ip', ARGV[6],
+    'created_at', ARGV[7], 'refresh_expires_at', ARGV[8],
+    'access_token', ARGV[9], 'refresh_token', ARGV[10])
+  redis.call('EXPIRE', KEYS[1], tonumber(ARGV[11]))
+  redis.call('SETEX', KEYS[2], tonumber(ARGV[12]), ARGV[1])
+  redis.call('SETEX', KEYS[3], tonumber(ARGV[13]), ARGV[1])
+  redis.call('ZADD', KEYS[4], tonumber(ARGV[14]), ARGV[1])
+  redis.call('ZADD', KEYS[5], tonumber(ARGV[14]), ARGV[1])
+  redis.call('EXPIRE', KEYS[4], tonumber(ARGV[11]))
+  redis.call('EXPIRE', KEYS[5], tonumber(ARGV[11]))
+  return 1
+  )lua";
 } // namespace
 
 bool SessionStore::connect(const std::string &redis_ip, int redis_port) {
@@ -127,36 +146,38 @@ bool SessionStore::createSession(const auth::LoginRequest &req,
   std::string rt = generateToken(64);
   int64_t refresh_expires_at = now + kRefreshTtlSec;
 
-  // ① 写 session hash（权威），一次 hset 一个字段，随后统一 EXPIRE
-  bool ok = true;
-  ok = ok && redis_.hset(sessionKey(sid), "session_id", sid);
-  ok = ok && redis_.hset(sessionKey(sid), "user_id", user_id);
-  ok = ok && redis_.hset(sessionKey(sid), "username", req.username());
-  ok = ok && redis_.hset(sessionKey(sid), "device_id", req.device_id());
-  ok = ok && redis_.hset(sessionKey(sid), "device_type",
-                         std::to_string(static_cast<int>(req.device_type())));
-  ok = ok && redis_.hset(sessionKey(sid), "client_ip", req.client_ip());
-  ok = ok && redis_.hset(sessionKey(sid), "created_at", std::to_string(now));
-  ok = ok && redis_.hset(sessionKey(sid), "refresh_expires_at",
-                         std::to_string(refresh_expires_at));
-  ok = ok && redis_.hset(sessionKey(sid), "access_token", at);
-  ok = ok && redis_.hset(sessionKey(sid), "refresh_token", rt);
-  ok = ok && redis_.expire(sessionKey(sid), kRefreshTtlSec);
-  if (!ok) {
-    LOG_ERROR("SessionStore::createSession: write session hash failed, sid=%s",
-              sid.c_str());
-    return false;
-  }
-  // ② SETEX 两个 token key。token key 绝不能出现无 TTL 状态。
-  if (!redis_.setex(accessKey(at), sid, kAccessTtlSec) ||
-      !redis_.setex(refreshKey(rt), sid, kRefreshTtlSec)) {
-    LOG_ERROR("SessionStore::createSession: setex token key failed, sid=%s",
-              sid.c_str());
-    return false;
-  }
-  // ③ 同端互踢：先清理该 device 索引里的过期成员，再 revoke 掉活跃旧会话。
-  //    索引是派生数据，失败只打日志，不阻断登录。
   int dtype = static_cast<int>(req.device_type());
+
+  // ①+②+④ 原子写：session hash + 两个 token key + 两个索引，一次 EVAL（1 次
+  // RTT）
+  std::vector<std::string> keys = {
+      sessionKey(sid),          accessKey(at),
+      refreshKey(rt),           userDeviceKey(user_id, dtype),
+      userSessionsKey(user_id),
+  };
+  std::vector<std::string> args = {
+      sid,                                // ARGV[1]
+      user_id,                            // ARGV[2]
+      req.username(),                     // ARGV[3]
+      req.device_id(),                    // ARGV[4]
+      std::to_string(dtype),              // ARGV[5]
+      req.client_ip(),                    // ARGV[6]
+      std::to_string(now),                // ARGV[7]
+      std::to_string(refresh_expires_at), // ARGV[8]
+      at,                                 // ARGV[9]
+      rt,                                 // ARGV[10]
+      std::to_string(kRefreshTtlSec),     // ARGV[11] session_ttl
+      std::to_string(kAccessTtlSec),      // ARGV[12] access_ttl
+      std::to_string(kRefreshTtlSec),     // ARGV[13] refresh_ttl
+      std::to_string(refresh_expires_at), // ARGV[14] score
+  };
+  if (!redis_.eval(kCreateSessionScript, keys, args)) {
+    LOG_ERROR("SessionStore::createSession: eval write failed, sid=%s",
+              sid.c_str());
+    return false;
+  }
+
+  // ③ 同端互踢（读结果决定动作，保留在 C++）
   std::string dev_key = userDeviceKey(user_id, dtype);
   int64_t removed =
       redis_.zremrangebyscore(dev_key, -1.0, static_cast<double>(now));
@@ -170,12 +191,6 @@ bool SessionStore::createSession(const auth::LoginRequest &req,
       revokeSession(old_sid);
     }
   }
-  // ④ ZADD 两个索引 + EXPIRE（尽力而为）
-  std::string all_key = userSessionsKey(user_id);
-  redis_.zadd(dev_key, static_cast<double>(refresh_expires_at), sid);
-  redis_.zadd(all_key, static_cast<double>(refresh_expires_at), sid);
-  redis_.expire(dev_key, kRefreshTtlSec);
-  redis_.expire(all_key, kRefreshTtlSec);
 
   // ⑤ 回填响应
   resp->set_success(true);
@@ -333,15 +348,16 @@ bool SessionStore::issueTicket(const std::string &access_token,
 }
 
 bool SessionStore::resolveTicket(const std::string &ticket,
-
-                                 auth::SessionInfo *out) {
-  std::string sid = redis_.get(ticketKey(ticket));
+                                 const std::string &gateway_id,
+                                 uint64_t conn_id, auth::SessionInfo *out) {
+  // 原子"取值+删除"：GETDEL 一次性消费，并发下只有一个请求能拿到 sid，
+  std::string sid = redis_.getdel(ticketKey(ticket));
   if (sid.empty()) {
-    return false; // 票不存在或已过期
+    return false; // 票不存在、已被消费或已过期
   }
-  // 一次性：立即删除（见步骤开头关于
-  // GET-then-DEL 竞态窗口的说明）
-  redis_.del(ticketKey(ticket));
+  // 记录票 → 连接绑定（短 TTL，审计/加固用；真正的防重放靠上面 GETDEL）
+  redis_.setex("auth:ticket:bind:" + ticket,
+               gateway_id + ":" + std::to_string(conn_id), kTicketTtlSec);
   auto fields = redis_.hgetall(sessionKey(sid));
   if (fields.empty()) {
     return false;
@@ -351,7 +367,6 @@ bool SessionStore::resolveTicket(const std::string &ticket,
   }
   return true;
 }
-
 // ---------- 多端会话管理 ----------
 std::vector<auth::SessionInfo>
 SessionStore::listSessions(const std::string &user_id) {

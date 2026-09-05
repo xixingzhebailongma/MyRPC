@@ -1,5 +1,6 @@
 #include "im.pb.h"
 #include "im_client_conn.h"
+#include "request_id.h"
 #include <atomic>
 #include <chrono>
 #include <csignal>
@@ -12,7 +13,8 @@
 using namespace im;
 
 static std::string g_ip = "127.0.0.1";
-static int g_port = 9001;
+static int g_port = 9000;    // 客户端默认连 Gateway
+static int g_im_port = 9001; // IM 直连端口（spoof-send 用它测拒绝）
 static const char *kStateFile = "/tmp/im_test_client.state";
 static std::atomic<bool> g_running{true};
 
@@ -278,6 +280,7 @@ int main(int argc, char **argv) {
     m->set_content(args[2]);
     m->set_chat_type(0);
     m->set_from_user_id("__spoof_should_be_overridden__"); // 服务端会覆盖
+    r.set_client_request_id(generateRequestId());
     SendMessageResponse resp;
     resp.ParseFromString(
         c.call("ImService", "SendMessage", r.SerializeAsString()));
@@ -469,7 +472,7 @@ int main(int argc, char **argv) {
       return 1;
     }
     ImClientConn c;
-    if (!c.connect(g_ip, g_port)) {
+    if (!c.connect(g_ip, g_im_port)) {
       std::cout << "connect failed\n";
       return 1;
     }
@@ -485,7 +488,7 @@ int main(int argc, char **argv) {
         c.call("ImService", "SendMessage", r.SerializeAsString()));
     std::cout << "spoof-send: success=" << resp.success() << " "
               << resp.message() << "\n";
-    std::cout << "  (期望 success=false 且 message=unauthenticated)\n";
+    std::cout << "  (期望 success=false 且 message 含 auth failed)\n";
     c.close();
     return 0;
   }

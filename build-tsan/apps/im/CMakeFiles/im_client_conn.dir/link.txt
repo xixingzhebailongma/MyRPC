@@ -1,0 +1,2 @@
+/usr/bin/ar qc libim_client_conn.a CMakeFiles/im_client_conn.dir/client/im_client_conn.cc.o
+/usr/bin/ranlib libim_client_conn.a

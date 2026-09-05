@@ -1,13 +1,41 @@
 syntax = "proto3";
 
-message RpcHeader{
-    string service_name = 1;
-    string method_name = 2;
-    uint64 sequence_id = 3;
-    int32 error_code = 4;
-}
+  // 消息类型：区分普通 RPC 与应用层心跳。
+  enum MessageType {
+    MSG_NORMAL = 0;        // 普通请求/响应（proto3 默认值，旧消息自动落此值）
+    MSG_HEARTBEAT = 1;     // 心跳 ping（客户端 -> 服务端）
+    MSG_HEARTBEAT_ACK = 2; // 心跳 pong（服务端 -> 客户端）
+  }
 
-message RpcMessage{
+// 网关注入的已认证身份：Gateway 用 ticket 在 Auth 侧 Resolve 后，把身份
+    // 连同 HMAC 签名塞进每个转发请求的 header，IM 验签后直接信任，不再重复鉴权。
+    message Identity {
+      string user_id          = 1;
+      string session_id       = 2;
+      string device_id        = 3;
+      string username         = 4;
+      int32  device_type      = 5; // 复用 auth.DeviceType 整数值，避免 core 协议 import auth.proto
+      int64  authenticated_at = 6; // 秒级 unix，Gateway 在 Connect 时填
+    }
+    message RpcHeader {
+      string service_name = 1;
+      string method_name = 2;
+      uint64 sequence_id = 3;
+      int32 error_code = 4;
+      string gateway_id = 5;      // 网关逻辑ID，如 "GW1"
+      uint64 conn_id = 6;         // 网关内连接ID
+      string client_ip = 7;       // 客户端真实IP（登录时传给 Auth）
+      string gateway_rpc_ip = 8;  // 网关 RPC 监听地址（IM 回推用）
+      int32  gateway_rpc_port = 9;
+      MessageType type = 10;      // 消息类型（默认 MSG_NORMAL）
+      string request_id = 11;     // 全局唯一幂等键，客户端生成，跨 failover 复用
+      Identity identity = 12;     // 已认证身份（Gateway 注入）
+      int64  timestamp = 13;      // 秒级 unix，Gateway 每条请求重填
+      string nonce     = 14;      // Gateway 每条请求生成的随机 nonce（防重放）
+      string signature = 15;      // HMAC-SHA256 hex，IM 验证
+    } 
+
+  message RpcMessage {
     RpcHeader header = 1;
     bytes body = 2;
-}
+  }

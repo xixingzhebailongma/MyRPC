@@ -1,0 +1,61 @@
+#include "Logger.h"
+#include "deliver_server.h"
+#include <atomic>
+#include <chrono>
+#include <csignal>
+#include <string>
+#include <thread>
+
+std::atomic<bool> running{true};
+
+void signalHandler(int) { running = false; }
+
+int main(int argc, char *argv[]) {
+  Logger::instance().init(LogLevel::DEBUG, "deliver_server.log", true);
+
+  std::string server_id = "deliver";
+  uint64_t worker_id = 0;
+  std::string etcd_endpoints = "http://127.0.0.1:2379";
+  std::string route_service = "RouteService";
+  std::string redis_ip = "127.0.0.1";
+  int redis_port = 6379;
+  std::string consumer_name = "deliver-1";
+
+  for (int i = 1; i < argc; ++i) {
+    std::string arg = argv[i];
+    if (arg.rfind("--server.id=", 0) == 0) {
+      server_id = arg.substr(12);
+    } else if (arg.rfind("--worker.id=", 0) == 0) {
+      worker_id = std::stoull(arg.substr(12));
+    } else if (arg.rfind("--etcd.endpoints=", 0) == 0) {
+      etcd_endpoints = arg.substr(17);
+    } else if (arg.rfind("--route.service=", 0) == 0) {
+      route_service = arg.substr(16);
+    } else if (arg.rfind("--redis.ip=", 0) == 0) {
+      redis_ip = arg.substr(11);
+    } else if (arg.rfind("--redis.port=", 0) == 0) {
+      redis_port = std::stoi(arg.substr(13));
+    } else if (arg.rfind("--consumer.name=", 0) == 0) {
+      consumer_name = arg.substr(16);
+    }
+  }
+
+  DeliverServer server(server_id, worker_id, route_service, etcd_endpoints,
+                       redis_ip, redis_port, consumer_name);
+  if (!server.init()) {
+    LOG_ERROR("deliver_server: init failed");
+    return 1;
+  }
+  server.start();
+  LOG_INFO("DeliverServer started (consumer=%s)", consumer_name.c_str());
+
+  signal(SIGINT, signalHandler);
+  signal(SIGTERM, signalHandler);
+  while (running) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  }
+
+  LOG_INFO("Shutting down...");
+  server.stop();
+  return 0;
+}

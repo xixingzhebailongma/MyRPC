@@ -1,0 +1,2 @@
+/usr/bin/ar qc libroute.a CMakeFiles/route.dir/route/route_server.cc.o
+/usr/bin/ranlib libroute.a

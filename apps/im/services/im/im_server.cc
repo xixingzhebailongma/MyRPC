@@ -3,11 +3,15 @@
 #include "EventLoop.h"
 #include "Logger.h"
 #include "auth.pb.h"
+#include "gateway_sign.h"
+#include "idempotency_redis.h"
 #include "im.pb.h"
 #include "message_store.h"
+#include "mq_constants.h"
 #include "rpc_channel.h"
 #include "user_dao.h"
 #include <chrono>
+#include <ctime>
 #include <functional>
 #include <google/protobuf/message.h>
 #include <memory>
@@ -15,46 +19,58 @@
 #include <stdexcept>
 #include <vector>
 ImServer::ImServer(const std::string &ip, int port,
-                   const std::string &server_id,
+                   const std::string &server_id, uint64_t worker_id,
                    const std::string &route_service,
                    const std::string &etcd_endpoints,
                    const std::string &redis_ip, int redis_port,
                    const DbConfig &db_cfg, const std::string &auth_service,
-                   bool auth_enabled)
-    : rpc_server_(ip, port), message_store_(server_id),
+                   bool auth_enabled, const std::string &shared_secret)
+    : rpc_server_(ip, port), message_store_(server_id, worker_id),
       route_client_(etcd_endpoints, route_service,
                     std::make_shared<ConsistentHashBalancer>(150)),
       auth_client_(etcd_endpoints, auth_service,
                    std::make_shared<RoundRobinBalancer>()),
       server_id_(server_id), ip_(ip), port_(port), redis_ip_(redis_ip),
       redis_port_(redis_port), auth_service_(auth_service),
-      auth_enabled_(auth_enabled) {
+      auth_enabled_(auth_enabled), shared_secret_(shared_secret) {
   // 注册 4 个 conn-aware handler
   rpc_server_.serviceManager().registerMethod(
       "ImService", "Login",
       std::bind(&ImServer::handleLogin, this, std::placeholders::_1,
-                std::placeholders::_2));
+                std::placeholders::_2, std::placeholders::_3));
   rpc_server_.serviceManager().registerMethod(
       "ImService", "SendMessage",
       std::bind(&ImServer::handleSendMessage, this, std::placeholders::_1,
-                std::placeholders::_2));
+                std::placeholders::_2, std::placeholders::_3));
   rpc_server_.serviceManager().registerMethod(
       "ImService", "GetFriendList",
       std::bind(&ImServer::handleGetFriendList, this, std::placeholders::_1,
-                std::placeholders::_2));
-  rpc_server_.serviceManager().registerMethod(
-      "ImService", "ForwardMessage",
-      std::bind(&ImServer::handleForwardMessage, this, std::placeholders::_1,
-                std::placeholders::_2));
+                std::placeholders::_2, std::placeholders::_3));
   //连接Redis
   if (!message_store_.connect(redis_ip_, redis_port_)) {
     throw std::runtime_error("Failed to connect Redis");
   }
+  // 连接 Redis（消息队列生产者，投递+重试下沉到 deliver_server）
+  if (!producer_.connect(redis_ip_, redis_port_)) {
+    throw std::runtime_error("Failed to connect Redis (producer)");
+  }
+  // 注入共享 Redis 幂等存储：把 request_id 去重从进程内 LRU 换成跨节点共享，
+  // 使 LbRpcClient failover 到其它节点时去重仍然生效。
+  auto idem_store = std::make_unique<IdempotencyRedis>();
+  if (!idem_store->connect(redis_ip_, redis_port_)) {
+    throw std::runtime_error("Failed to connect Redis (idempotency store)");
+  }
+  rpc_server_.setIdempotencyStore(std::move(idem_store));
   // 连接 MySQL（注册/登录/好友）
   if (!user_dao_.init(db_cfg)) {
     throw std::runtime_error("Failed to connect MySQL");
   }
-  // 注入事件发布器：DAO 写库成功后 -> 序列化为 proto -> Redis Pub/Sub 广播
+  // nonce 防重放存储（验签用）：SET NX EX 5
+  if (!nonce_redis_.connect(redis_ip_, redis_port_)) {
+    throw std::runtime_error("Failed to connect Redis (nonce store)");
+  }
+  // 注入事件发布器：DAO 写库成功后 -> 序列化为 proto -> Redis Pub/Sub
+  // 广播
   user_dao_.setPublisher([this](const ::UserChangedEvent &ev) {
     im::UserChangedEvent pev;
     switch (ev.type) {
@@ -79,65 +95,67 @@ ImServer::ImServer(const std::string &ip, int port,
     message_store_.publish("im:user:events", payload);
   });
   //注册ACK确认&离线消息拉取（注意：proto类型是typo版PullOfflien...)
+  // 两参 handler 一律用 lambda 而非 std::bind：bind
+  // 表达式可吞掉多余实参，会同时匹配 conn-aware 和 with-context
+  // 两个 registerMethod 重载而产生歧义。
   rpc_server_.serviceManager().registerMethod(
       "ImService", "AckMessage",
-      std::bind(&ImServer::handleAckMessage, this, std::placeholders::_1,
-                std::placeholders::_2));
+      [this](spConnection conn, const std::string &body) {
+        return handleAckMessage(conn, body);
+      });
   rpc_server_.serviceManager().registerMethod(
       "ImService", "PullOfflineMessages",
       std::bind(&ImServer::handlePullOfflineMessages, this,
-                std::placeholders::_1, std::placeholders::_2));
+                std::placeholders::_1, std::placeholders::_2,
+                std::placeholders::_3));
   rpc_server_.serviceManager().registerMethod(
       "ImService", "Register",
-      std::bind(&ImServer::handleRegister, this, std::placeholders::_1,
-                std::placeholders::_2));
+      [this](spConnection conn, const std::string &body) {
+        return handleRegister(conn, body);
+      });
   rpc_server_.serviceManager().registerMethod(
       "ImService", "AddFriend",
       std::bind(&ImServer::handleAddFriend, this, std::placeholders::_1,
-                std::placeholders::_2));
+                std::placeholders::_2, std::placeholders::_3));
   rpc_server_.serviceManager().registerMethod(
       "ImService", "ChangePassword",
       std::bind(&ImServer::handleChangePassword, this, std::placeholders::_1,
-                std::placeholders::_2));
+                std::placeholders::_2, std::placeholders::_3));
   rpc_server_.serviceManager().registerMethod(
       "ImService", "Connect",
       std::bind(&ImServer::handleConnect, this, std::placeholders::_1,
-                std::placeholders::_2));
+                std::placeholders::_2, std::placeholders::_3));
   rpc_server_.serviceManager().registerMethod(
       "ImService", "IssueTicket",
-      std::bind(&ImServer::handleIssueTicket, this, std::placeholders::_1,
-                std::placeholders::_2));
+      [this](spConnection conn, const std::string &body) {
+        return handleIssueTicket(conn, body);
+      });
   rpc_server_.serviceManager().registerMethod(
       "ImService", "Refresh",
-      std::bind(&ImServer::handleRefresh, this, std::placeholders::_1,
-                std::placeholders::_2));
+      [this](spConnection conn, const std::string &body) {
+        return handleRefresh(conn, body);
+      });
   rpc_server_.serviceManager().registerMethod(
       "ImService", "Logout",
       std::bind(&ImServer::handleLogout, this, std::placeholders::_1,
-                std::placeholders::_2));
-  //注册 1s 周期定时器，用于消息重试检查（timerfd 定时器，与 IO
-  //负载无关，不会被饿死）
-  rpc_server_.setPeriodTimer(
-      1.0, [this](EventLoop *loop) { this->onRetryCheck(loop); });
-  // // 注册到 etcd，service name 用 server_id（如 "IM1", "IM2"）
-  rpc_server_.enableRegistry(etcd_endpoints, server_id_, ip_, port_);
-  // 连接关闭时：注销 Route 路由 + 标记用户离线
-  rpc_server_.setCloseConnectionCallback([this](spConnection conn) {
-    std::string user_id;
-    bool was_last = user_manager_.userOfflineByFd(conn->fd(), &user_id);
-    // 只有该用户在本节点的最后一条会话关闭时才注销 Route，
-    // 否则会误伤用户其它仍在线设备的路由。
-    if (was_last && !user_id.empty()) {
-      unregisterUserFromRoute(user_id);
-    }
+                std::placeholders::_2, std::placeholders::_3));
+  rpc_server_.serviceManager().registerMethod(
+      "ImService", "ClientDisconnect",
+      [this](spConnection conn, const std::string &body) {
+        return handleClientDisconnect(conn, body);
+      });
+  // ===== 周期任务样板：每 30 秒统计在线用户数 =====
+  // ① setPeriodTimer 的回调在 mainloop（主线程 = accept
+  // 循环）里执行，必须轻量：
+  //    这里只"发令"，立刻返回，绝不在回调里做重活。
+  // ② 真正的统计（加锁、遍历容器）丢给 submitTask → workPool_ 工作线程。
+  rpc_server_.setPeriodTimer(30.0, [this](EventLoop *loop) {
+    (void)loop; // 用不到 loop 指针，显式忽略，避免编译告警
+    rpc_server_.submitTask([this]() { reportOnlineStats(); });
   });
-  // 连接建立：登记到未握手表
-  rpc_server_.setNewConnectionCallback(
-      [this](spConnection conn) { this->onNewConnection(conn); });
-  // 握手超时扫描（独立 1s 定时器；底层 setPeriodicTimer
-  // 每次注册独立定时器，安全）
-  rpc_server_.setPeriodTimer(
-      1.0, [this](EventLoop *loop) { this->sweepHandshakes(loop); });
+  // 注册到 etcd：所有 IM 节点共享 "ImService" 服务名，供 Gateway 发现
+  rpc_server_.enableRegistry(etcd_endpoints, "ImService", ip_, port_);
+  // 连接断开 / 握手超时由 Gateway 负责，通过 ClientDisconnect 通知本节点清理。
   // 订阅路由变更事件：上线→预暖缓存，下线→失效缓存
   route_subscriber_.start(
       redis_ip_, redis_port_, "im:route:events",
@@ -147,8 +165,11 @@ ImServer::ImServer(const std::string &ip, int port,
       redis_ip_, redis_port_, "im:user:events",
       [this](const std::string &payload) { this->onUserChanged(payload); });
 }
+
 void ImServer::start() { rpc_server_.start(); }
+
 void ImServer::stop() {
+
   route_subscriber_.stop();
   user_subscriber_.stop();
   rpc_server_.stop();
@@ -156,7 +177,8 @@ void ImServer::stop() {
 
 //面向客户端的RPC接口
 std::string ImServer::handleLogin(spConnection conn,
-                                  const std::string &request_body) {
+                                  const std::string &request_body,
+                                  const RpcHeader &hdr) {
   im::LoginRequest req;
   im::LoginResponse resp;
   if (!req.ParseFromString(request_body)) {
@@ -176,7 +198,7 @@ std::string ImServer::handleLogin(spConnection conn,
     areq.set_password(req.password());
     areq.set_device_id(req.device_id());
     areq.set_device_type(static_cast<auth::DeviceType>(req.device_type()));
-    areq.set_client_ip(conn->ip());
+    areq.set_client_ip(hdr.client_ip());
 
     std::string resp_body;
     int32_t err = 0;
@@ -204,16 +226,20 @@ std::string ImServer::handleLogin(spConnection conn,
       return resp.SerializeAsString();
     }
     resp.set_token(user_id + "_token");
-    session_id = "legacy:" + std::to_string(conn->fd());
+    session_id =
+        "legacy:" + hdr.gateway_id() + ":" + std::to_string(hdr.conn_id());
   }
 
-  // 2. 本地记录上线（多端会话）
+  // 2. 本地记录上线（多端会话）：连接引用 = 客户端所在的 Gateway 连接
+  ClientConnRef ref;
+  ref.gateway_id = hdr.gateway_id();
+  ref.conn_id = hdr.conn_id();
+  ref.gateway_rpc_ip = hdr.gateway_rpc_ip();
+  ref.gateway_rpc_port = hdr.gateway_rpc_port();
   user_manager_.userOnline(session_id, user_id, req.username(), req.device_id(),
-                           req.device_type(), conn);
-  // 登录成功即视为握手完成，把连接从未握手表移除（否则 10 秒后会被超时误杀）
-  completeHandshake(conn->fd());
+                           req.device_type(), ref);
   // 3. 向 Route Server 注册路由
-  bool ok = registerUserOnline(user_id);
+  bool ok = registerUserOnline(user_id, ref);
 
   // 4. 用户上线后投递离线消息
   auto offline_msgs = message_store_.fetchOfflineMessages(user_id);
@@ -228,26 +254,51 @@ std::string ImServer::handleLogin(spConnection conn,
 }
 std::string ImServer::handleRegister(spConnection conn,
                                      const std::string &request_body) {
+  (void)conn;
   im::RegisterRequest req;
   im::RegisterResponse resp;
   if (!req.ParseFromString(request_body)) {
     resp.set_success(false);
     resp.set_message("parse error");
-    std::string out;
-    resp.SerializeToString(&out);
-    return out;
+    return resp.SerializeAsString();
   }
+
+  if (auth_enabled_) {
+    // 委托 AuthServer：注册收口到身份 owner，和 Login/Refresh/Logout 对称
+    auth::RegisterRequest areq;
+    areq.set_username(req.username());
+    areq.set_password(req.password());
+    std::string resp_body;
+    int32_t err = 0;
+    if (!auth_client_.Call("Register", areq.SerializeAsString(), resp_body,
+                           err)) {
+      resp.set_success(false);
+      resp.set_message("auth service unavailable");
+      return resp.SerializeAsString();
+    }
+    auth::RegisterResponse aresp;
+    if (!aresp.ParseFromString(resp_body)) {
+      resp.set_success(false);
+      resp.set_message("auth response parse error");
+      return resp.SerializeAsString();
+    }
+    resp.set_success(aresp.success());
+    resp.set_message(aresp.message());
+    return resp.SerializeAsString();
+  }
+
+  // 旧路径：--auth.enabled=false 灰度回退，本地直写
   std::string err;
   bool ok = user_dao_.registerUser(req.username(), req.password(), &err);
   resp.set_success(ok);
   resp.set_message(ok ? "register ok" : err);
-  std::string out;
-  resp.SerializeToString(&out);
-  return out;
+  return resp.SerializeAsString();
 }
 
 std::string ImServer::handleAddFriend(spConnection conn,
-                                      const std::string &request_body) {
+                                      const std::string &request_body,
+                                      const RpcHeader &hdr) {
+
   im::AddFriendRequest req;
   im::AddFriendResponse resp;
   if (!req.ParseFromString(request_body)) {
@@ -257,13 +308,14 @@ std::string ImServer::handleAddFriend(spConnection conn,
     resp.SerializeToString(&out);
     return out;
   }
-  // 鉴权：身份从连接推导，而非客户端自报的 user_id
-  std::string uid = user_manager_.getUserIdByFd(conn->fd());
-  if (uid.empty()) {
+  // 鉴权：身份由 Gateway 注入并签名
+  std::string auth_err;
+  if (!verifyIdentity(hdr, &auth_err)) {
     resp.set_success(false);
-    resp.set_message("unauthenticated");
+    resp.set_message(std::string("auth failed: ") + auth_err);
     return resp.SerializeAsString();
   }
+  std::string uid = hdr.identity().user_id();
   std::string err;
   bool ok = user_dao_.addFriend(uid, req.friend_id(), &err);
   resp.set_success(ok);
@@ -274,7 +326,8 @@ std::string ImServer::handleAddFriend(spConnection conn,
 }
 
 std::string ImServer::handleChangePassword(spConnection conn,
-                                           const std::string &request_body) {
+                                           const std::string &request_body,
+                                           const RpcHeader &hdr) {
   im::ChangePasswordRequest req;
   im::ChangePasswordResponse resp;
   if (!req.ParseFromString(request_body)) {
@@ -284,13 +337,14 @@ std::string ImServer::handleChangePassword(spConnection conn,
     resp.SerializeToString(&out);
     return out;
   }
-  // 鉴权：只允许改自己的密码，身份从连接推导
-  std::string uid = user_manager_.getUserIdByFd(conn->fd());
-  if (uid.empty()) {
+  // 鉴权：身份由 Gateway 注入并签名
+  std::string auth_err;
+  if (!verifyIdentity(hdr, &auth_err)) {
     resp.set_success(false);
-    resp.set_message("unauthenticated");
+    resp.set_message(std::string("auth failed: ") + auth_err);
     return resp.SerializeAsString();
   }
+  std::string uid = hdr.identity().user_id();
   std::string err;
   bool ok = user_dao_.updatePassword(uid, req.new_password(), &err);
   resp.set_success(ok);
@@ -299,8 +353,11 @@ std::string ImServer::handleChangePassword(spConnection conn,
   resp.SerializeToString(&out);
   return out;
 }
+
 std::string ImServer::handleSendMessage(spConnection conn,
-                                        const std::string &request_body) {
+                                        const std::string &request_body,
+                                        const RpcHeader &hdr) {
+
   im::SendMessageRequest req;
   im::SendMessageResponse resp;
   if (!req.ParseFromString(request_body)) {
@@ -310,13 +367,14 @@ std::string ImServer::handleSendMessage(spConnection conn,
     resp.SerializeToString(&out);
     return out;
   }
-  // 鉴权：发送者身份从连接推导，强制覆盖客户端自报的 from_user_id
-  std::string uid = user_manager_.getUserIdByFd(conn->fd());
-  if (uid.empty()) {
+  // 鉴权：身份由 Gateway 注入并签名
+  std::string auth_err;
+  if (!verifyIdentity(hdr, &auth_err)) {
     resp.set_success(false);
-    resp.set_message("unauthenticated");
+    resp.set_message(std::string("auth failed: ") + auth_err);
     return resp.SerializeAsString();
   }
+  std::string uid = hdr.identity().user_id();
 
   //复制为可变对象
   ChatMessage msg = req.msg();
@@ -332,20 +390,15 @@ std::string ImServer::handleSendMessage(spConnection conn,
     return out;
   }
   msg.set_msg_id(real_msg_id);
-
-  //设置状态和时间戳
   msg.set_status(im::MessageStatus::SENT);
-  int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                       std::chrono::system_clock::now().time_since_epoch())
-                       .count();
 
-  //幂等去重：按 (发送者, client_request_id) 隔离，不再用全局 msg_id
+  //幂等去重：按 (发送者, client_request_id) 隔离
   const std::string &client_request_id = req.client_request_id();
   if (!client_request_id.empty()) {
     std::string existing;
-    if (!message_store_.tryClaimRequest(msg.from_user_id(), client_request_id,
-                                        real_msg_id, &existing)) {
-      //重复请求：返回之前已分配的 msg_id，保证响应幂等
+    MessageStore::ClaimResult cr = message_store_.tryClaimRequest(
+        msg.from_user_id(), client_request_id, real_msg_id, &existing);
+    if (cr == MessageStore::ClaimResult::kDuplicate) {
       resp.set_success(true);
       resp.set_message("duplicate,ignored");
       resp.set_msg_id(existing.empty() ? real_msg_id : existing);
@@ -353,33 +406,47 @@ std::string ImServer::handleSendMessage(spConnection conn,
       resp.SerializeToString(&out);
       return out;
     }
+    if (cr == MessageStore::ClaimResult::kError) {
+      // Redis 不可用：不去重、不入队，显式返回失败，客户端可稍后重试
+      resp.set_success(false);
+      resp.set_message("dedup store unavailable");
+      std::string out;
+      resp.SerializeToString(&out);
+      return out;
+    }
+    // kFirst：继续入队
   }
 
-  //路由投递
-  bool ok = routeMessage(msg);
+  // 投递+重试下沉到 deliver_server：这里只「快入队、快返回」
+  std::string payload;
+  msg.SerializeToString(&payload);
+  std::string entry_id;
+  if (!producer_.produce(immq::kDeliveryStream, payload, &entry_id)) {
+    // 入队失败 = 消息真正丢失：回滚去重键，允许客户端重试重投
+    if (!client_request_id.empty()) {
+      message_store_.releaseRequestClaim(uid, client_request_id);
+      LOG_ERROR("handleSendMessage: enqueue failed, released claim for user=%s",
+                uid.c_str());
+    }
+    resp.set_success(false);
+    resp.set_message("enqueue failed");
+    std::string out;
+    resp.SerializeToString(&out);
+    return out;
+  }
+  message_store_.markStatus(msg.msg_id(), im::MessageStatus::SENT);
 
-  //无论成功失败都返回msg_id
   resp.set_msg_id(msg.msg_id());
-  if (ok) {
-    // 成功 -> 状态置 SENT + 加入待确认队列（score = 首次重试到期时间）
-    message_store_.markStatus(msg.msg_id(), im::MessageStatus::SENT);
-    message_store_.addPending(msg, now_ms + RETRY_INTERVAL_MS);
-    resp.set_success(true);
-    resp.set_message("sent,waiting delivery ack");
-  } else {
-    // 失败 -> 状态置 SENT 保持一致，再存离线消息
-    message_store_.markStatus(msg.msg_id(), im::MessageStatus::SENT);
-    message_store_.storeOfflineMessage(msg.to_user_id(), msg);
-    resp.set_success(true);
-    resp.set_message("store offline");
-  }
+  resp.set_success(true);
+  resp.set_message("sent");
   std::string out;
   resp.SerializeToString(&out);
   return out;
 }
 
 std::string ImServer::handleGetFriendList(spConnection conn,
-                                          const std::string &request_body) {
+                                          const std::string &request_body,
+                                          const RpcHeader &hdr) {
   im::GetFriendListRequest req;
   im::GetFriendListResponse resp;
   if (!req.ParseFromString(request_body)) {
@@ -388,12 +455,13 @@ std::string ImServer::handleGetFriendList(spConnection conn,
     resp.SerializeToString(&out);
     return out;
   }
-  // 鉴权：身份从连接推导
-  std::string uid = user_manager_.getUserIdByFd(conn->fd());
-  if (uid.empty()) {
+  // 鉴权：身份由 Gateway 注入并签名
+  std::string auth_err;
+  if (!verifyIdentity(hdr, &auth_err)) {
     resp.set_success(false);
     return resp.SerializeAsString();
   }
+  std::string uid = hdr.identity().user_id();
   resp.set_success(true);
   // 从 DB 查真实好友（username==user_id 约定不变）
   auto friends = user_dao_.getFriendList(uid);
@@ -408,24 +476,6 @@ std::string ImServer::handleGetFriendList(spConnection conn,
   return out;
 }
 
-//面向其它IM server的接口
-// IM2 收到 IM1 转发的消息 → 投递给 B）
-std::string ImServer::handleForwardMessage(spConnection conn,
-                                           const std::string &request_body) {
-  im::ForwardMessageRequest req;
-  im::ForwardMessageResponse resp;
-  if (!req.ParseFromString(request_body)) {
-    resp.set_success(false);
-    std::string out;
-    resp.SerializeToString(&out);
-    return out;
-  }
-  bool ok = deliverLocal(req.msg());
-  resp.set_success(ok);
-  std::string out;
-  resp.SerializeToString(&out);
-  return out;
-}
 //处理客户端发来的ACK确认
 std::string ImServer::handleAckMessage(spConnection conn,
                                        const std::string &request_body) {
@@ -439,30 +489,15 @@ std::string ImServer::handleAckMessage(spConnection conn,
     return out;
   }
   const MessageAck &ack = req.ack();
+  const std::string &msg_id = ack.msg_id();
 
-  // 1.更新Redis中的消息状态
-  message_store_.markStatus(ack.msg_id(), ack.status());
+  // 节点无关的 ACK：只写全局状态键 msg:status:{msg_id}，不再跨节点删 pending。
+  // 发送节点的 onRetryCheck 会在重试前查到 DELIVERED/READ
+  // 并自行清理自己的队列， 因此这里无需（也不能）从 msg_id 反解发送节点。
+  message_store_.markStatus(msg_id, ack.status());
 
-  // 2. 从待确认队列移除（不再需要重试）
-  message_store_.removePending(ack.msg_id());
-
-  // 3. ACK 回投：本地优先 → 本地缓存 → 回源兜底
-  if (user_manager_.isOnline(ack.to_user_id())) {
-    deliverLocal(ack); // 目标在本节点 → 直接推
-  } else {
-    RouteQueryResponse route;
-    if (route_cache_.get(ack.to_user_id(), &route)) {
-      forwardAckToRemote(ack, route);
-    } else {
-      route = queryUserRoute(ack.to_user_id());
-      if (route.found()) {
-        route_cache_.put(ack.to_user_id(), route.server_id(), route.server_ip(),
-                         route.server_port());
-        forwardAckToRemote(ack, route);
-      }
-      // 查不到路由（发送方已下线）→ 丢弃 ACK，状态已落 Redis
-    }
-  }
+  // ACK 回投：按路由表扇出到原始发送方所有在线连接（Gateway 回推）
+  deliverLocal(ack);
 
   //返回成功
   resp.set_success(true);
@@ -472,9 +507,9 @@ std::string ImServer::handleAckMessage(spConnection conn,
 }
 
 //处理客户端拉取离线消息
-std::string
-ImServer::handlePullOfflineMessages(spConnection conn,
-                                    const std::string &request_body) {
+std::string ImServer::handlePullOfflineMessages(spConnection conn,
+                                                const std::string &request_body,
+                                                const RpcHeader &hdr) {
   //解析PullOfflienMessagesRequest（注意：proto 里就是 typo 版 "Offlien"）
   im::PullOfflienMessagesRequest req;
   im::PullOfflienMessagesResponse resp;
@@ -484,12 +519,14 @@ ImServer::handlePullOfflineMessages(spConnection conn,
     resp.SerializeToString(&out);
     return out;
   }
-  // 鉴权：只能拉自己的离线消息，身份从连接推导
-  std::string uid = user_manager_.getUserIdByFd(conn->fd());
-  if (uid.empty()) {
+  // 鉴权：身份由 Gateway 注入并签名
+  std::string auth_err;
+  if (!verifyIdentity(hdr, &auth_err)) {
     resp.set_success(false);
     return resp.SerializeAsString();
   }
+
+  std::string uid = hdr.identity().user_id();
   //从Redis拉取该用户的离线消息
   auto messages = message_store_.fetchOfflineMessages(uid);
 
@@ -505,95 +542,55 @@ ImServer::handlePullOfflineMessages(spConnection conn,
   resp.SerializeToString(&out);
   return out;
 }
-//消息路由核心
-//消息路由核心：本地在线优先 → 本地缓存命中 → 回源 RouteServer 兜底
-bool ImServer::routeMessage(const ChatMessage &msg) {
-  if (user_manager_.isOnline(msg.to_user_id())) {
-    //目标用户在本节点->直接投递
-    return deliverLocal(msg);
-  }
-  RouteQueryResponse route;
-  if (!route_cache_.get(msg.to_user_id(), &route)) {
-    //缓存 miss -> 回源权威路由表
-    route = queryUserRoute(msg.to_user_id());
-    if (!route.found()) {
-      return false; //对方不在线
-    }
-    route_cache_.put(msg.to_user_id(), route.server_id(), route.server_ip(),
-                     route.server_port());
-  }
-  return forwardToRemote(msg, route);
-}
-//本地投递 → 把 ChatMessage 推给目标连接
-bool ImServer::deliverLocal(const ChatMessage &msg) {
-  auto conns = user_manager_.getConnections(msg.to_user_id());
-  if (conns.empty()) {
-    //用户不在线 → 存入离线队列，等用户上线后拉取
-    return message_store_.storeOfflineMessage(msg.to_user_id(), msg);
-  }
+
+//本地投递 → 把 ChatMessage 推给目标用户所有在线连接（经 Gateway 回推）
+bool ImServer::deliverLocal(const ChatMessage &msg, bool store_on_miss) {
   ServerPushEnvelope envelope;
   envelope.set_type(ServerPushEnvelope::CHAT_MESSAGE);
   msg.SerializeToString(envelope.mutable_payload());
-  // 打包成 [4字节LE长度][ChatMessage序列化] 帧
+  // 打包成 [4字节LE长度][ServerPushEnvelope序列化] 帧
   std::string frame = packFrame(envelope);
-  // 多端：每个在线设备都推一份
-  for (auto &conn : conns) {
-    conn->send(frame.data(), frame.size());
+
+  std::vector<RouteServer> servers = resolveRoutes(msg.to_user_id());
+  bool delivered = false;
+  for (const auto &s : servers) {
+    delivered = pushToGateway(s, frame) || delivered;
   }
-  return true;
+  // 离线是否落库由调用方决策（store_on_miss）
+  if (!delivered && store_on_miss) {
+    message_store_.storeOfflineMessage(msg.to_user_id(), msg);
+  }
+  return delivered;
 }
-//重载：推送 ACK 通知给原始发送方
+//重载：推送 ACK 通知给原始发送方（经 Gateway 回推）
 bool ImServer::deliverLocal(const MessageAck &ack) {
-  auto conns = user_manager_.getConnections(ack.to_user_id());
-  if (conns.empty()) {
-    return false; //原始发送发不在线，无法推送
-  }
   ServerPushEnvelope envelope;
   envelope.set_type(ServerPushEnvelope::DELIVERY_ACK);
   ack.SerializeToString(envelope.mutable_payload());
   std::string frame = packFrame(envelope);
-  for (auto &conn : conns) {
-    conn->send(frame.data(), frame.size());
+  std::vector<RouteServer> servers = resolveRoutes(ack.to_user_id());
+  bool delivered = false;
+  for (const auto &s : servers) {
+    delivered = pushToGateway(s, frame) || delivered;
   }
-  return true;
+  return delivered;
 }
 
-//通用远程调用：复用连接池+RpcChannel::Call
-bool ImServer::callRemote(const RouteQueryResponse &route,
-                          const std::string &method,
-                          const google::protobuf::Message &req,
-                          google::protobuf::Message *resp) {
-  auto server_id = route.server_id();
-  // 1. 从连接池获取或创建到目标 IM Server 的 RpcChannel（池内部加锁）
-  RpcChannel *channel = server_channels_.getOrCreate(
-      server_id, route.server_ip(), static_cast<uint16_t>(route.server_port()));
-  // 2. 序列化请求并调用
-  std::string req_body;
-  req.SerializeToString(&req_body);
+// 回推到某个 Gateway 上的连接：把已打包的帧发过去，由 Gateway 写回对应 conn
+bool ImServer::pushToGateway(const RouteServer &server,
+                             const std::string &frame, bool force_close) {
+  // 从连接池获取或创建到目标 Gateway 的 RpcChannel（池内部加锁）
+  auto ch =
+      server_channels_.getOrCreate(server.server_id(), server.server_ip(),
+                                   static_cast<uint16_t>(server.server_port()));
+  im::GatewayPushRequest req;
+  req.set_conn_id(server.conn_id());
+  req.set_frame(frame);
+  req.set_force_close(force_close);
+  std::string req_body = req.SerializeAsString();
   std::string resp_body;
   int32_t err = 0;
-  bool ok = channel->Call("ImService", method, req_body, resp_body, err);
-  if (ok && resp) {
-    resp->ParseFromString(resp_body);
-  }
-  return ok;
-}
-
-//转发 ChatMessage（薄封装）
-bool ImServer::forwardToRemote(const ChatMessage &msg,
-                               const RouteQueryResponse &route) {
-  im::ForwardMessageRequest req;
-  *req.mutable_msg() = msg;
-  im::ForwardMessageResponse resp;
-  return callRemote(route, "ForwardMessage", req, &resp);
-}
-// 转发 ACK 回发送方节点（薄封装，复用已注册的 "AckMessage" 方法）
-bool ImServer::forwardAckToRemote(const MessageAck &ack,
-                                  const RouteQueryResponse &route) {
-  im::AckMessageRequest req;
-  *req.mutable_ack() = ack;
-  im::AckMessageResponse resp;
-  return callRemote(route, "AckMessage", req, &resp);
+  return ch->Call("GatewayService", "Push", req_body, resp_body, err);
 }
 // Route Server交互
 RouteQueryResponse ImServer::queryUserRoute(const std::string &user_id) {
@@ -611,12 +608,25 @@ RouteQueryResponse ImServer::queryUserRoute(const std::string &user_id) {
   resp.ParseFromString(resp_body);
   return resp;
 }
-bool ImServer::registerUserOnline(const std::string &user_id) {
+std::vector<RouteServer> ImServer::resolveRoutes(const std::string &user_id) {
+  std::vector<RouteServer> servers;
+  if (!route_cache_.get(user_id, &servers)) {
+    RouteQueryResponse resp = queryUserRoute(user_id);
+    for (const auto &s : resp.servers())
+      servers.push_back(s);
+    if (resp.found())
+      route_cache_.put(user_id, servers);
+  }
+  return servers;
+}
+bool ImServer::registerUserOnline(const std::string &user_id,
+                                  const ClientConnRef &ref) {
   im::RouteRegisterRequest req;
   req.set_user_id(user_id);
-  req.set_server_id(server_id_);
-  req.set_server_ip(ip_);
-  req.set_server_port(port_);
+  req.set_server_id(ref.gateway_id); // 现在注册的是 Gateway 位置
+  req.set_server_ip(ref.gateway_rpc_ip);
+  req.set_server_port(ref.gateway_rpc_port);
+  req.set_conn_id(ref.conn_id);
   std::string req_body;
   req.SerializeToString(&req_body);
 
@@ -624,9 +634,12 @@ bool ImServer::registerUserOnline(const std::string &user_id) {
   int32_t err = 0;
   return route_client_.Call("RouteRegister", req_body, resp_body, err, user_id);
 }
-bool ImServer::unregisterUserFromRoute(const std::string &user_id) {
+bool ImServer::unregisterUserFromRoute(const std::string &user_id,
+                                       const ClientConnRef &ref) {
   im::RouteUnregisterRequest req;
   req.set_user_id(user_id);
+  req.set_server_id(ref.gateway_id); // 只注销这条连接对应的路由
+  req.set_conn_id(ref.conn_id);
   std::string req_body;
   req.SerializeToString(&req_body);
 
@@ -641,10 +654,10 @@ void ImServer::onRouteChange(const std::string &payload) {
     return;
   }
   if (ev.online()) {
-    route_cache_.put(ev.user_id(), ev.server_id(), ev.server_ip(),
-                     ev.server_port());
+    route_cache_.add(ev.user_id(), ev.server());
   } else {
-    route_cache_.invalidate(ev.user_id());
+    route_cache_.remove(ev.user_id(), ev.server().server_id(),
+                        ev.server().conn_id());
   }
 }
 
@@ -653,7 +666,8 @@ void ImServer::onUserChanged(const std::string &payload) {
   if (!ev.ParseFromString(payload)) {
     return;
   }
-  kickOffline(ev);
+  // 不阻塞订阅线程：把踢下线逻辑投递到工作池异步执行，立即返回继续收下一条事件
+  rpc_server_.submitTask([this, ev = std::move(ev)]() { kickOffline(ev); });
 }
 void ImServer::kickOffline(const im::UserChangedEvent &ev) {
   if (!user_manager_.isOnline(ev.user_id())) {
@@ -680,18 +694,14 @@ void ImServer::kickOffline(const im::UserChangedEvent &ev) {
     notice.set_message("账号状态已变更，请重新登录");
     break;
   }
-  auto conns = user_manager_.getConnections(ev.user_id());
-  if (conns.empty()) {
-    return;
-  }
   im::ServerPushEnvelope envelope;
   envelope.set_type(im::ServerPushEnvelope::SYSTEM_NOTICE);
   notice.SerializeToString(envelope.mutable_payload());
   std::string frame = packFrame(envelope);
-  // 多端：每个在线设备都推一条系统通知，然后全部 forceClose
-  for (auto &conn : conns) {
-    conn->send(frame.data(), frame.size());
-    conn->forceClose();
+  // 多端：每个在线设备都推一条系统通知，然后让 Gateway 关闭该连接
+  std::vector<RouteServer> servers = resolveRoutes(ev.user_id());
+  for (const auto &s : servers) {
+    pushToGateway(s, frame, /*force_close=*/true);
   }
 }
 std::string ImServer::packFrame(const google::protobuf::Message &msg) {
@@ -704,75 +714,51 @@ std::string ImServer::packFrame(const google::protobuf::Message &msg) {
   return frame;
 }
 
-void ImServer::onRetryCheck(EventLoop *loop) {
-  int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                       std::chrono::system_clock::now().time_since_epoch())
-                       .count();
-  // 拉取所有到期的待确认消息（score <= now_ms）
-  auto due = message_store_.fetchDuePending(now_ms);
-
-  for (auto &rec : due) {
-    const std::string &id = rec.msg().msg_id();
-    if (rec.retry_count() < MAX_RETRY) {
-      if (routeMessage(rec.msg())) {
-        //重试成功：延期 + 更新 retry_count
-        message_store_.updatePending(rec.msg(), rec.retry_count() + 1,
-                                     now_ms + RETRY_INTERVAL_MS);
-      } else {
-        // 重试投递失败（目标下线/网络失败）→ 转离线，不再无限重试
-        message_store_.storeOfflineMessage(rec.msg().to_user_id(), rec.msg());
-        message_store_.removePending(id);
-      }
-    } else {
-      // 超过最大重试次数 → 标记 FAILED 并移除
-      message_store_.markStatus(id, im::MessageStatus::FAILED);
-      message_store_.removePending(id);
-    }
-  }
+void ImServer::reportOnlineStats() {
+  // 本函数跑在 workPool_ 工作线程里，可以安全地加锁、遍历，
+  // 甚至做阻塞 IO（Redis/MySQL 查询），都不会拖慢 mainloop 的 accept。
+  size_t users = user_manager_.onlineUserCount();
+  size_t sessions = user_manager_.sessionCount();
+  LOG_INFO("IM[%s] online: %zu users / %zu sessions", server_id_.c_str(), users,
+           sessions);
 }
 
-// ---------- 长连接握手管理 ----------
-void ImServer::onNewConnection(spConnection conn) {
-  std::lock_guard<std::mutex> lock(handshakes_mutex_);
-  pending_handshakes_[conn->fd()] = std::make_pair(
-      std::weak_ptr<Connection>(conn), std::chrono::steady_clock::now());
-}
-
-void ImServer::completeHandshake(int fd) {
-  std::lock_guard<std::mutex> lock(handshakes_mutex_);
-  pending_handshakes_.erase(fd);
-}
-
-void ImServer::sweepHandshakes(EventLoop *loop) {
-  (void)loop;
-  auto now = std::chrono::steady_clock::now();
-  std::vector<std::shared_ptr<Connection>> to_close;
-  {
-    std::lock_guard<std::mutex> lock(handshakes_mutex_);
-    for (auto it = pending_handshakes_.begin();
-         it != pending_handshakes_.end();) {
-      auto conn = it->second.first.lock();
-      if (!conn) {
-        it = pending_handshakes_.erase(it); // 连接已死，顺手清掉
-        continue;
-      }
-      if (now - it->second.second >=
-          std::chrono::seconds(kHandshakeTimeoutSec)) {
-        to_close.push_back(conn);
-        it = pending_handshakes_.erase(it);
-      } else {
-        ++it;
-      }
-    }
+bool ImServer::verifyIdentity(const RpcHeader &hdr, std::string *err) {
+  if (!hdr.has_identity() || hdr.signature().empty()) {
+    if (err)
+      *err = "missing identity";
+    return false;
   }
-  // 释放锁后再 forceClose（内部 queueinloop，不阻塞）
-  for (auto &conn : to_close) {
-    conn->forceClose();
+  // 1. 时间戳新鲜度（±5s，秒级）
+  int64_t now = static_cast<int64_t>(std::time(nullptr));
+  int64_t ts = hdr.timestamp();
+  if (ts < now - 5 || ts > now + 5) {
+    return false;
   }
+  // 2. nonce 防重放：SET NX EX 5，key 已存在 = 重放
+  SetResult sr = nonce_redis_.setNxEx("sig:nonce:" + hdr.nonce(), "1", 5);
+  if (sr == SetResult::kExists) {
+    if (err)
+      *err = "nonce replay";
+    return false;
+  }
+  if (sr == SetResult::kError) {
+    // Redis 不可用：nonce 防重放降级为跳过，但 HMAC 验签仍强制执行
+    LOG_WARN("verifyIdentity: nonce store unavailable, skip replay check");
+  }
+  // 3. HMAC 验签
+  if (!gateway_sign::verify(shared_secret_, hdr)) {
+    if (err)
+      *err = "signature mismatch";
+    return false;
+  }
+  return true;
 }
 
 std::string ImServer::handleConnect(spConnection conn,
-                                    const std::string &request_body) {
+                                    const std::string &request_body,
+                                    const RpcHeader &hdr) {
+  (void)conn;
   im::ConnectRequest req;
   im::ConnectResponse resp;
   if (!req.ParseFromString(request_body)) {
@@ -781,43 +767,33 @@ std::string ImServer::handleConnect(spConnection conn,
     return resp.SerializeAsString();
   }
 
-  // 委托 AuthServer 消费一次性票据
-  auth::ResolveTicketRequest areq;
-  areq.set_ticket(req.ticket());
-  std::string resp_body;
-  int32_t err = 0;
-  if (!auth_client_.Call("ResolveTicket", areq.SerializeAsString(), resp_body,
-                         err)) {
+  // 身份由 Gateway 注入并签名：验签后直接信任，不再调 Auth ResolveTicket
+  std::string err;
+  if (!verifyIdentity(hdr, &err)) {
     resp.set_success(false);
-    resp.set_message("auth service unavailable");
+    resp.set_message(std::string("auth failed: ") + err);
     return resp.SerializeAsString();
   }
-  auth::ResolveTicketResponse aresp;
-  if (!aresp.ParseFromString(resp_body) || !aresp.valid()) {
-    resp.set_success(false);
-    resp.set_message(aresp.valid() ? "auth response parse error"
-                                   : aresp.message());
-    return resp.SerializeAsString();
-  }
-  const auth::SessionInfo &s = aresp.session();
-
-  // 绑定会话
-  user_manager_.userOnline(s.session_id(), s.user_id(), s.username(),
-                           s.device_id(), static_cast<int>(s.device_type()),
-                           conn);
-  bool ok = registerUserOnline(s.user_id());
+  const Identity &id = hdr.identity();
+  // 绑定会话：连接引用 = 客户端所在的 Gateway 连接
+  ClientConnRef ref;
+  ref.gateway_id = hdr.gateway_id();
+  ref.conn_id = hdr.conn_id();
+  ref.gateway_rpc_ip = hdr.gateway_rpc_ip();
+  ref.gateway_rpc_port = hdr.gateway_rpc_port();
+  user_manager_.userOnline(id.session_id(), id.user_id(), id.username(),
+                           id.device_id(), id.device_type(), ref);
+  bool ok = registerUserOnline(id.user_id(), ref);
 
   // 投递离线消息
-  auto offline = message_store_.fetchOfflineMessages(s.user_id());
+  auto offline = message_store_.fetchOfflineMessages(id.user_id());
   for (auto &m : offline) {
     deliverLocal(m);
   }
-  message_store_.clearOfflineMessages(s.user_id());
-
-  completeHandshake(conn->fd());
+  message_store_.clearOfflineMessages(id.user_id());
 
   resp.set_success(ok);
-  resp.set_user_id(s.user_id());
+  resp.set_user_id(id.user_id());
   resp.set_message(ok ? "connect ok" : "route register failed");
   return resp.SerializeAsString();
 }
@@ -888,7 +864,8 @@ std::string ImServer::handleRefresh(spConnection conn,
 }
 
 std::string ImServer::handleLogout(spConnection conn,
-                                   const std::string &request_body) {
+                                   const std::string &request_body,
+                                   const RpcHeader &hdr) {
   im::LogoutRequest req;
   im::LogoutResponse resp;
   if (!req.ParseFromString(request_body)) {
@@ -900,15 +877,51 @@ std::string ImServer::handleLogout(spConnection conn,
   areq.set_access_token(req.access_token());
   std::string resp_body;
   int32_t err = 0;
+  std::string auth_err;
+  if (!verifyIdentity(hdr, &auth_err)) {
+    resp.set_success(false);
+    resp.set_message(std::string("auth failed: ") + auth_err);
+    return resp.SerializeAsString();
+  }
   // 登出幂等：AuthServer 侧找不到 token 也返回成功
   auth_client_.Call("Logout", areq.SerializeAsString(), resp_body, err);
 
   // 本地解绑：这条连接从此不再是已认证状态，后续请求会被当作未认证拒绝。
   // 不主动 forceClose —— 让框架正常发回响应，连接留着但已无身份。
   std::string uid;
-  bool was_last = user_manager_.userOfflineByFd(conn->fd(), &uid);
+  std::string conn_key = hdr.gateway_id() + ":" + std::to_string(hdr.conn_id());
+  bool was_last = user_manager_.userOfflineByConn(conn_key, &uid);
   if (was_last && !uid.empty()) {
-    unregisterUserFromRoute(uid);
+    ClientConnRef ref;
+    ref.gateway_id = hdr.gateway_id();
+    ref.conn_id = hdr.conn_id();
+    ref.gateway_rpc_ip = hdr.gateway_rpc_ip();
+    ref.gateway_rpc_port = hdr.gateway_rpc_port();
+    unregisterUserFromRoute(uid, ref);
+  }
+  resp.set_success(true);
+  return resp.SerializeAsString();
+}
+
+// Gateway -> IM：客户端连接断开，通知本节点清理会话 + 注销路由
+std::string ImServer::handleClientDisconnect(spConnection conn,
+                                             const std::string &request_body) {
+  (void)conn;
+  im::ClientDisconnectRequest req;
+  im::ClientDisconnectResponse resp;
+  if (!req.ParseFromString(request_body)) {
+    resp.set_success(false);
+    return resp.SerializeAsString();
+  }
+  std::string conn_key = req.gateway_id() + ":" + std::to_string(req.conn_id());
+  std::string uid;
+  bool was_last = user_manager_.userOfflineByConn(conn_key, &uid);
+  if (was_last && !uid.empty()) {
+    ClientConnRef ref;
+    ref.gateway_id = req.gateway_id();
+    ref.conn_id = req.conn_id();
+    // 注销路由只需 gateway_id + conn_id，rpc_ip/port 留空即可
+    unregisterUserFromRoute(uid, ref);
   }
   resp.set_success(true);
   return resp.SerializeAsString();
