@@ -10,6 +10,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <openssl/ssl.h>
 #include <sys/syscall.h>
 class EventLoop;
 class Channel;
@@ -27,6 +28,12 @@ private:
   Timestamp lastActiveTime_; //最近一次收到数据的时间
   double idletimeout_ = 0.0; //秒；0=禁用（默认不启用空闲检测）
 
+  // TLS：ssl_ 持有本次连接的会话对象。SSL_new 内部会 up_ref ctx，
+  // 所以 SSL_CTX 由 TcpServer 独立持有即可，本类只管 ssl_ 生命周期。
+  std::unique_ptr<SSL, decltype(&SSL_free)> ssl_{nullptr, SSL_free};
+  bool tls_enabled_ = false;
+  bool handshake_done_ = false;
+
   std::function<void(spConnection)> closecallback_;
   std::function<void(spConnection)>
       errorcallback_; // fd_发生了错误的回调函数，将回调TcpServer::errorconnection()。
@@ -38,8 +45,10 @@ private:
   void
   armIdleTimerInLoop(double seconds); // 在所属 loop 线程装一次性定时器并重装
   bool idleExpired(double timeout) const; //空闲是否已超时
+  void driveHandshake(); // 驱动非阻塞 TLS 握手（SSL_accept）
 public:
-  Connection(EventLoop *loop, std::unique_ptr<Socket> clientsock);
+  Connection(EventLoop *loop, std::unique_ptr<Socket> clientsock,
+             SSL_CTX *tls_ctx = nullptr);
   ~Connection();
 
   int fd() const;

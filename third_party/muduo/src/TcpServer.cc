@@ -1,5 +1,6 @@
 #include "../include/TcpServer.h"
 #include "Logger.h"
+#include <openssl/err.h> // ← 新增：ERR_get_error / ERR_error_string
 TcpServer::TcpServer(const std::string &ip, const uint16_t port, int threadnum)
     : mainloop_(new EventLoop(true)), acceptor_(mainloop_.get(), ip, port),
       threadnum_(threadnum), threadpool_(threadnum_, "IO") {
@@ -21,6 +22,34 @@ TcpServer::~TcpServer() {
     LOG_WARN("TcpServer 析构时尚未调用 stop()，执行紧急停止。");
     stop();
   }
+}
+
+void TcpServer::enableTls(const std::string &cert, const std::string &key) {
+  tls_ctx_.reset(SSL_CTX_new(TLS_server_method()));
+  if (!tls_ctx_) {
+    LOG_ERROR("TcpServer: SSL_CTX_new failed");
+    return;
+  }
+  if (SSL_CTX_use_certificate_chain_file(tls_ctx_.get(), cert.c_str()) != 1) {
+    LOG_ERROR("TcpServer: load cert failed: %s",
+              ERR_error_string(ERR_get_error(), nullptr));
+    tls_ctx_.reset();
+    return;
+  }
+  if (SSL_CTX_use_PrivateKey_file(tls_ctx_.get(), key.c_str(),
+                                  SSL_FILETYPE_PEM) != 1) {
+    LOG_ERROR("TcpServer: load key failed: %s",
+              ERR_error_string(ERR_get_error(), nullptr));
+    tls_ctx_.reset();
+    return;
+  }
+  if (SSL_CTX_check_private_key(tls_ctx_.get()) != 1) {
+    LOG_ERROR("TcpServer: private key mismatch: %s",
+              ERR_error_string(ERR_get_error(), nullptr));
+    tls_ctx_.reset();
+    return;
+  }
+  LOG_INFO("TcpServer: TLS enabled (cert=%s)", cert.c_str());
 }
 
 void TcpServer::start() { mainloop_->run(); }
@@ -73,8 +102,9 @@ void TcpServer::stop() {
 }
 
 void TcpServer::newconnection(std::unique_ptr<Socket> clientsock) {
-  spConnection conn(new Connection(
-      subloops_[clientsock->fd() % threadnum_].get(), std::move(clientsock)));
+  spConnection conn(
+      new Connection(subloops_[clientsock->fd() % threadnum_].get(),
+                     std::move(clientsock), tls_ctx_.get()));
   conn->setclosecallback(
       std::bind(&TcpServer::closeconnection, this, std::placeholders::_1));
   conn->seterrorcallback(
@@ -163,15 +193,14 @@ void TcpServer::settimeoutcb(std::function<void(EventLoop *)> fn) {
   timeoutcb_ = fn;
 }
 
-void TcpServer::setPeriodicTimer(double interval, std::function<void (EventLoop *)> fn){
+void TcpServer::setPeriodicTimer(double interval,
+                                 std::function<void(EventLoop *)> fn) {
   // runEvery 只能在 loop 线程内调用（TimerQueue 操作 std::set 无锁），
-    // 所以用 queueinloop 把"注册定时器"这个动作投递到主 loop 线程里执行。
-    EventLoop* loop = mainloop_.get();
-    loop->queueinloop([loop,interval,fn]{
-      loop->runEvery(interval, [loop,fn](){
-        fn(loop);
-      });
-    });
+  // 所以用 queueinloop 把"注册定时器"这个动作投递到主 loop 线程里执行。
+  EventLoop *loop = mainloop_.get();
+  loop->queueinloop([loop, interval, fn] {
+    loop->runEvery(interval, [loop, fn]() { fn(loop); });
+  });
 }
 // 删除conns_中的Connection对象，在EventLoop::handletimer()中将回调此函数。
 void TcpServer::removeconn(int fd) {

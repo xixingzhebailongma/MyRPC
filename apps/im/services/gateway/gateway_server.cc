@@ -46,6 +46,11 @@ GatewayServer::GatewayServer(const std::string &client_ip, uint16_t client_port,
       });
 }
 
+void GatewayServer::enableClientTls(const std::string &cert,
+                                    const std::string &key) {
+  client_server_.enableTls(cert, key);
+}
+
 void GatewayServer::start() {
   client_server_.start();
   rpc_server_.start();

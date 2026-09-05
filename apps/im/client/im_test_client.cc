@@ -15,10 +15,19 @@ using namespace im;
 static std::string g_ip = "127.0.0.1";
 static int g_port = 9000;    // 客户端默认连 Gateway
 static int g_im_port = 9001; // IM 直连端口（spoof-send 用它测拒绝）
+static std::string g_tls_ca; // 校验服务端证书的 CA（自签证书即证书本身）
+static bool g_tls_insecure = false; // 跳过证书校验（仅加密不认证）
 static const char *kStateFile = "/tmp/im_test_client.state";
 static std::atomic<bool> g_running{true};
 
 static void onSignal(int) { g_running = false; }
+
+// 按需启用 TLS 后连接 Gateway；连接失败返回 false。
+static bool connectTls(ImClientConn &c) {
+  if (!g_tls_ca.empty() || g_tls_insecure)
+    c.enableTls(g_tls_ca, g_tls_insecure);
+  return c.connect(g_ip, g_port);
+}
 
 static void usage() {
   std::cout
@@ -121,19 +130,27 @@ static bool bindViaTicket(ImClientConn &c, const std::string &at,
 }
 
 int main(int argc, char **argv) {
-  // 解析 --server.ip / --server.port
+  // SSL_write 无法带 MSG_NOSIGNAL，忽略 SIGPIPE 防止进程被对端断开杀死。
+  signal(SIGPIPE, SIG_IGN);
+
+  // 解析 --server.ip / --server.port / --tls.ca / --tls.insecure
   for (int i = 1; i < argc; ++i) {
     std::string arg = argv[i];
-    if (arg.rfind("--server.ip=", 0) == 0)
+    if (arg.rfind("--server.ip=", 0) == 0) {
       g_ip = arg.substr(12);
-    else if (arg.rfind("--server.port=", 0) == 0)
+    } else if (arg.rfind("--server.port=", 0) == 0) {
       g_port = std::stoi(arg.substr(14));
+    } else if (arg.rfind("--tls.ca=", 0) == 0) {
+      g_tls_ca = arg.substr(9);
+    } else if (arg == "--tls.insecure") {
+      g_tls_insecure = true;
+    }
   }
 
   std::vector<std::string> args;
   for (int i = 1; i < argc; ++i) {
     std::string a = argv[i];
-    if (a.rfind("--server.", 0) != 0)
+    if (a.rfind("--server.", 0) != 0 && a.rfind("--tls.", 0) != 0)
       args.push_back(a);
   }
   if (args.empty()) {
@@ -149,7 +166,7 @@ int main(int argc, char **argv) {
       return 1;
     }
     ImClientConn c;
-    if (!c.connect(g_ip, g_port)) {
+    if (!connectTls(c)) {
       std::cout << "connect failed\n";
       return 1;
     }
@@ -172,7 +189,7 @@ int main(int argc, char **argv) {
       return 1;
     }
     ImClientConn c;
-    if (!c.connect(g_ip, g_port)) {
+    if (!connectTls(c)) {
       std::cout << "connect failed\n";
       return 1;
     }
@@ -206,7 +223,7 @@ int main(int argc, char **argv) {
       return 1;
     }
     ImClientConn c;
-    if (!c.connect(g_ip, g_port)) {
+    if (!connectTls(c)) {
       std::cout << "connect failed\n";
       return 1;
     }
@@ -228,7 +245,7 @@ int main(int argc, char **argv) {
       return 1;
     }
     ImClientConn c;
-    if (!c.connect(g_ip, g_port)) {
+    if (!connectTls(c)) {
       std::cout << "connect failed\n";
       return 1;
     }
@@ -264,7 +281,7 @@ int main(int argc, char **argv) {
       return 1;
     }
     ImClientConn c;
-    if (!c.connect(g_ip, g_port)) {
+    if (!connectTls(c)) {
       std::cout << "connect failed\n";
       return 1;
     }
@@ -298,7 +315,7 @@ int main(int argc, char **argv) {
       return 1;
     }
     ImClientConn c;
-    if (!c.connect(g_ip, g_port)) {
+    if (!connectTls(c)) {
       std::cout << "connect failed\n";
       return 1;
     }
@@ -332,7 +349,7 @@ int main(int argc, char **argv) {
       return 1;
     }
     ImClientConn c;
-    if (!c.connect(g_ip, g_port)) {
+    if (!connectTls(c)) {
       std::cout << "connect failed\n";
       return 1;
     }
@@ -365,7 +382,7 @@ int main(int argc, char **argv) {
       return 1;
     }
     ImClientConn c;
-    if (!c.connect(g_ip, g_port)) {
+    if (!connectTls(c)) {
       std::cout << "connect failed\n";
       return 1;
     }
@@ -394,7 +411,7 @@ int main(int argc, char **argv) {
       return 1;
     }
     ImClientConn c;
-    if (!c.connect(g_ip, g_port)) {
+    if (!connectTls(c)) {
       std::cout << "connect failed\n";
       return 1;
     }
@@ -421,7 +438,7 @@ int main(int argc, char **argv) {
       return 1;
     }
     ImClientConn c;
-    if (!c.connect(g_ip, g_port)) {
+    if (!connectTls(c)) {
       std::cout << "connect failed\n";
       return 1;
     }
@@ -443,7 +460,7 @@ int main(int argc, char **argv) {
       return 1;
     }
     ImClientConn c;
-    if (!c.connect(g_ip, g_port)) {
+    if (!connectTls(c)) {
       std::cout << "connect failed\n";
       return 1;
     }

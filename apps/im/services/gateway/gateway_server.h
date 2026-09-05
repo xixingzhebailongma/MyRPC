@@ -28,6 +28,9 @@ public:
                 const std::string &im_service, const std::string &auth_service,
                 const std::string &shared_secret);
 
+  // 启用客户端接入 TLS（须在 start() 前调用）
+  void enableClientTls(const std::string &cert, const std::string &key);
+
   void start();
   void stop();
 
