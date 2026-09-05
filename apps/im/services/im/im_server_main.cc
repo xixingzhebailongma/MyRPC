@@ -16,10 +16,13 @@ int main(int argc, char *argv[]) {
   std::string ip = "0.0.0.0";
   int port = 9001;
   std::string server_id = "IM1";
+  uint64_t worker_id =
+      0; // 雪花 worker_id，多节点部署时每个节点必须不同（0~1023）
   std::string etcd_endpoints = "http://127.0.0.1:2379";
   std::string route_service = "RouteService";
   std::string auth_service = "AuthService";
   bool auth_enabled = true;
+  std::string shared_secret = ""; // Gateway↔IM 共享密钥
   //初始化 Redis(消息持久化)
   std::string redis_ip = "127.0.0.1";
   int redis_port = 6379;
@@ -38,6 +41,8 @@ int main(int argc, char *argv[]) {
       port = std::stoi(arg.substr(14));
     } else if (arg.rfind("--server.id=", 0) == 0) {
       server_id = arg.substr(12);
+    } else if (arg.rfind("--worker.id=", 0) == 0) {
+      worker_id = std::stoull(arg.substr(12));
     } else if (arg.rfind("--etcd.endpoints=", 0) == 0) {
       etcd_endpoints = arg.substr(17);
     } else if (arg.rfind("--route.service=", 0) == 0) {
@@ -63,6 +68,8 @@ int main(int argc, char *argv[]) {
     } else if (arg.rfind("--auth.enabled=", 0) == 0) {
       std::string v = arg.substr(15);
       auth_enabled = (v == "true" || v == "1");
+    } else if (arg.rfind("--shared.secret=", 0) == 0) {
+      shared_secret = arg.substr(16);
     }
   }
   DbConfig db_cfg;
@@ -73,8 +80,9 @@ int main(int argc, char *argv[]) {
   db_cfg.db = mysql_db;
   db_cfg.pool_size = mysql_pool_size;
   // 4.创建ImServer
-  ImServer server(ip, port, server_id, route_service, etcd_endpoints, redis_ip,
-                  redis_port, db_cfg, auth_service, auth_enabled);
+  ImServer server(ip, port, server_id, worker_id, route_service, etcd_endpoints,
+                  redis_ip, redis_port, db_cfg, auth_service, auth_enabled,
+                  shared_secret);
 
   LOG_INFO("Redis connected at %s:%d", redis_ip.c_str(), redis_port);
   //启动

@@ -30,7 +30,7 @@ private:
   std::function<void(spConnection)> closecallback_;
   std::function<void(spConnection)>
       errorcallback_; // fd_发生了错误的回调函数，将回调TcpServer::errorconnection()。
-  std::function<void(spConnection, std::string &)>
+  std::function<void(spConnection, Buffer &)>
       onmessagecallback_; // 处理报文的回调函数，将回调TcpServer::onmessage()。
   std::function<void(spConnection)>
       sendcompletecallback_; // 发送数据完成后的回调函数，将回调TcpServer::sendcomplete()。
@@ -54,12 +54,16 @@ public:
       std::function<void(spConnection)> fn); // 设置关闭fd_的回调函数。
   void seterrorcallback(
       std::function<void(spConnection)> fn); // 设置fd_发生了错误的回调函数。
-  void setonmessagecallback(std::function<void(spConnection, std::string &)>
+  void setonmessagecallback(std::function<void(spConnection, Buffer &)>
                                 fn); // 设置处理报文的回调函数。
   void setsendcompletecallback(
       std::function<void(spConnection)> fn); // 发送数据完成后的回调函数。
 
   void send(const char *data, size_t size);
+  void send(std::string &&data);
+  // 移动语义：调用方交出字符串所有权，省一次深拷贝
+  void send(std::shared_ptr<std::string> data);
+  // 直接持有共享串，跨线程投递只加引用计数
   // 发送数据，如果当前线程是IO线程，直接调用此函数，如果是工作线程，将把此函数传给IO线程去执行。
   // void sendinloop(const char *data,size_t size);
   void sendinloop(std::shared_ptr<std::string> data);

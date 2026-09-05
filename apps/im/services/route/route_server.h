@@ -4,7 +4,9 @@
 #include "rpc_server.h"
 #include <memory>
 #include <string>
-
+/*key    = "im:route:" + user_id            // 每个用户一个 hash
+  field  = "server_id:conn_id"              // 如 "GW1:12345"
+  value  = "server_ip:server_port"          // 如 "10.0.0.1:9000"*/
 class RouteServer {
 public:
   RouteServer(const std::string &ip, uint16_t port, const std::string &redis_ip,

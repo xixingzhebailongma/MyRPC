@@ -27,6 +27,16 @@
     int64      refresh_expires_at = 8;   // 秒级 unix 时间戳
   }
 
+  // ---------- Register：创建账号（与 Login 对称，身份唯一入口） ----------
+  message RegisterRequest {
+    string username = 1;
+    string password = 2;
+  }
+  message RegisterResponse {
+    bool   success = 1;
+    string message = 2;
+  }
+
   // ---------- Login：唯一签发令牌的入口 ----------
   message LoginRequest {
     string     username    = 1;
@@ -55,9 +65,11 @@
   }
 
   // ---------- ResolveTicket：长连接握手，一次性消费 ----------
-  message ResolveTicketRequest {
-    string ticket = 1;
-  }
+ message ResolveTicketRequest {
+      string ticket     = 1;
+      string gateway_id = 2; // 把票绑定到具体 Gateway 连接，防重放（加固）
+      uint64 conn_id    = 3;
+    } 
   message ResolveTicketResponse {
     bool        valid   = 1;
     string      message = 2;

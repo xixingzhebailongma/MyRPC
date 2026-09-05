@@ -2,27 +2,29 @@
 #include "Connection.h"
 #include "Logger.h"
 #include "TcpServer.h"
+#include "idempotency_lru.h"
+#include "idempotency_store.h"
 #include "rpc_header.pb.h"
 #include "rpc_protocol.h"
 #include "service_manager.h"
 #include "service_registry.h"
 #include <cstdint>
 #include <string>
-
 RpcServer::RpcServer(const std::string &ip, uint16_t port, int threadnum,
                      int workthreadnum)
-    : server_(ip, port, threadnum), workPool_(workthreadnum, "WORK") {
+    : server_(ip, port, threadnum), workPool_(workthreadnum, "WORK"),
+      idemStore_(std::make_unique<IdempotencyLru>()) {
   //绑定消息回调
-  server_.setonmessagecb([this](spConnection conn, std::string &message) {
-    this->onMessage(conn, message);
-  });
+  server_.setonmessagecb(
+      [this](spConnection conn, Buffer &buf) { this->onMessage(conn, buf); });
   //绑定新连接回调
   server_.setnewconnectioncb(
       [this](spConnection conn) { this->onConnection(conn); });
-  //绑定连接关闭回调
-  server_.setcloseconnectioncb([this](spConnection conn) {
-    if (closeConnectionCb_)
-      closeConnectionCb_(conn);
+  //绑定连接关闭回调（仅日志：连接生命周期已上移到应用层 RPC，
+  //见 ImService/ClientDisconnect）
+  server_.setcloseconnectioncb([](spConnection conn) {
+    LOG_INFO("RpcServer: connection closed %s:%d", conn->ip().c_str(),
+             conn->port());
   });
 }
 
@@ -51,70 +53,193 @@ void RpcServer::stop() {
 void RpcServer::submitTask(std::function<void()> task) {
   workPool_.addtask(std::move(task));
 }
+void RpcServer::setIdempotencyStore(std::unique_ptr<IdempotencyStore> store) {
+  idemStore_ = std::move(store);
+}
+void RpcServer::onMessage(spConnection conn, Buffer &buf) {
+  // muduo 现在是哑管道，这里用 protocol 的 tryDecodeFrame 逐帧剥头。
+  while (true) {
+    std::string payload;
+    size_t frame_len = 0;
+    FrameDecode r =
+        tryDecodeFrame(buf.peek(), buf.readableBytes(), &frame_len, &payload);
+    if (r == FrameDecode::kOk) {
+      buf.retrieve(frame_len); // 消费掉这一帧
+      dispatch(conn, std::move(payload));
+    } else if (r == FrameDecode::kError) {
+      LOG_WARN("RpcServer: illegal frame length from fd=%d, closing.",
+               conn->fd());
+      conn->forceClose();
+      return;
+    } else { // kNeedMore
+      break;
+    }
+  }
+}
 
-void RpcServer::onMessage(spConnection conn, std::string &message) {
-  // message已经被muduo的pickmessage()去掉4字节长度前缀
-  //所以这里直接反序列化proto
-
+void RpcServer::dispatch(spConnection conn, std::string payload) {
   RpcMessage request;
-  if (!decodeMessage(message, request)) {
+  if (!decodeMessage(payload, request)) {
     LOG_WARN("RpcServer: failed to decode RPC message from fd=%d", conn->fd());
     return;
   }
   const auto &header = request.header();
 
-  // message/request 是临时引用，不能跨线程引用；按值拷到局部变量
   std::string service_name = header.service_name();
   std::string method_name = header.method_name();
-  uint64_t seq = header.sequence_id(); // proto 字段为 uint64
+  uint64_t seq = header.sequence_id();
   std::string body = request.body();
 
-  LOG_INFO("RpcServer: request service=%s method=%s seq=%lu",
-           header.service_name().c_str(), header.method_name().c_str(),
-           header.sequence_id());
+  LOG_DEBUG("RpcServer: request service=%s method=%s seq=%lu",
+            service_name.c_str(), method_name.c_str(), seq);
 
-  // IO线程内解析handler并按值拷出std::function,避免worker并发查map
-  std::function<std::string(spConnection, const std::string &)> callable;
-  // 优先查找需要 connection 的 handler
-  auto handlerWithConn = serviceMgr_.findMethodWithConn(header.service_name(),
-                                                        header.method_name());
+  RpcHeader hdr = header; // 完整 header（含 gateway_id/conn_id/client_ip 等）
 
-  RpcMessage response;
-  if (handlerWithConn) {
-    // 调用带连接的处理函数
-    callable = handlerWithConn; // conn-aware直调
-  } else {
-    auto handler =
-        serviceMgr_.findMethod(header.service_name(), header.method_name());
+  // 应用层心跳：按 type 识别，走 workPool_ 应答 pong（业务线程池打满时心跳也
+  // 答不上，客户端才能探测到“进程活着但服务卡死”），任务本身极小。
+  if (header.type() == MessageType::MSG_HEARTBEAT) {
+    workPool_.addtask(
+        [conn, seq]() { conn->send(encodeMessage(buildHeartbeatAck(seq))); });
+    return;
+  }
 
-    if (handler) {
-      // 非 conn-aware 忽略 conn
-      callable = [handler](spConnection, const std::string &body) {
-        return handler(body);
-      };
-    } else {
-      //交给业务线程池执行（捕获 conn 共享指针保活）
-      LOG_WARN("RpcServer: method not found: %s.%s",
-               header.service_name().c_str(), header.method_name().c_str());
-      std::string wire =
-          encodeMessage(buildResponse(header.sequence_id(), -1, ""));
-      conn->send(wire.data(), wire.size());
+  // 幂等去重：非心跳且带 request_id 的请求，先 claim 一次，短路后续 3 种
+  // handler。 claim 成功（kExecute）后才执行 handler，worker 内 complete()；
+  // 命中完成态（kReplay）直接重放缓存响应；命中 in-flight（kInFlight）丢弃，
+  // 客户端超时后会用同一 request_id 重试，届时命中 kReplay。
+  const std::string &request_id = header.request_id();
+  const bool dedup_enabled = !request_id.empty();
+  std::string cache_key;
+  IdempotencyStore *idem = idemStore_.get(); // 拷贝裸指针，lambda 不捕获 this
+  if (dedup_enabled) {
+    cache_key = service_name + "/" + method_name + ":" + request_id;
+    std::string cached_body;
+    IdemResult r = idem->claim(cache_key, &cached_body);
+    if (r == IdemResult::kReplay) {
+      LOG_DEBUG("RpcServer: replay idempotent response %s seq=%lu",
+                cache_key.c_str(), seq);
+      conn->send(encodeMessage(buildResponse(seq, 0, cached_body)));
       return;
     }
+    if (r == IdemResult::kInFlight) {
+      LOG_WARN("RpcServer: duplicate in-flight %s seq=%lu, dropping",
+               cache_key.c_str(), seq);
+      return;
+    }
+    // kExecute：继续执行；handler 未找到等失败路径会 abort() 释放占位。
   }
-  // 交给业务线程池执行（捕获 conn 共享指针保活）
-  workPool_.addtask([conn, callable, seq, body]() {
-    std::string resp = callable(conn, body);
-    std::string wire = encodeMessage(buildResponse(seq, 0, resp));
-    conn->send(wire.data(), wire.size());
-  });
-}
 
+  // 1) 优先查找带 context(header) 的 handler
+  auto handlerWithContext =
+      serviceMgr_.findMethodWithContext(service_name, method_name);
+  if (handlerWithContext) {
+    workPool_.addtask([conn, handlerWithContext, seq, body, hdr, dedup_enabled,
+                       cache_key, idem]() {
+      std::string resp = handlerWithContext(conn, body, hdr);
+      if (dedup_enabled)
+        idem->complete(cache_key, resp);
+      std::string wire = encodeMessage(buildResponse(seq, 0, resp));
+      conn->send(std::move(wire));
+    });
+    return;
+  }
+
+  // 2) 其次查找需要 connection 的 handler
+  auto handlerWithConn =
+      serviceMgr_.findMethodWithConn(service_name, method_name);
+  if (handlerWithConn) {
+    workPool_.addtask(
+        [conn, handlerWithConn, seq, body, dedup_enabled, cache_key, idem]() {
+          std::string resp = handlerWithConn(conn, body);
+          if (dedup_enabled)
+            idem->complete(cache_key, resp);
+          std::string wire = encodeMessage(buildResponse(seq, 0, resp));
+          conn->send(std::move(wire));
+        });
+    return;
+  }
+
+  // 3) 最后查找普通 handler
+  auto handler = serviceMgr_.findMethod(service_name, method_name);
+  if (handler) {
+    workPool_.addtask(
+        [conn, handler, seq, body, dedup_enabled, cache_key, idem]() {
+          std::string resp = handler(body);
+          if (dedup_enabled)
+            idem->complete(cache_key, resp);
+          std::string wire = encodeMessage(buildResponse(seq, 0, resp));
+          conn->send(std::move(wire));
+        });
+    return;
+  }
+  // 结果型 handler（带 error_code）：成功才缓存；失败 abort
+  // 不缓存，允许重试重执行。
+  auto handlerWithContextResult =
+      serviceMgr_.findMethodWithContextResult(service_name, method_name);
+  if (handlerWithContextResult) {
+    workPool_.addtask([conn, handlerWithContextResult, seq, body, hdr,
+                       dedup_enabled, cache_key, idem]() {
+      RpcMethodResult result = handlerWithContextResult(conn, body, hdr);
+      if (dedup_enabled) {
+        if (result.error_code == 0)
+          idem->complete(cache_key, result.body);
+        else
+          idem->abort(cache_key); // 失败不缓存，客户端重试会真正重执行
+      }
+      std::string wire =
+          encodeMessage(buildResponse(seq, result.error_code, result.body));
+      conn->send(std::move(wire));
+    });
+    return;
+  }
+
+  auto handlerWithConnResult =
+      serviceMgr_.findMethodWithConnResult(service_name, method_name);
+  if (handlerWithConnResult) {
+    workPool_.addtask([conn, handlerWithConnResult, seq, body, dedup_enabled,
+                       cache_key, idem]() {
+      RpcMethodResult result = handlerWithConnResult(conn, body);
+      if (dedup_enabled) {
+        if (result.error_code == 0)
+          idem->complete(cache_key, result.body);
+        else
+          idem->abort(cache_key);
+      }
+      std::string wire =
+          encodeMessage(buildResponse(seq, result.error_code, result.body));
+      conn->send(std::move(wire));
+    });
+    return;
+  }
+
+  auto handlerResult = serviceMgr_.findMethodResult(service_name, method_name);
+  if (handlerResult) {
+    workPool_.addtask(
+        [conn, handlerResult, seq, body, dedup_enabled, cache_key, idem]() {
+          RpcMethodResult result = handlerResult(body);
+          if (dedup_enabled) {
+            if (result.error_code == 0)
+              idem->complete(cache_key, result.body);
+            else
+              idem->abort(cache_key);
+          }
+          std::string wire =
+              encodeMessage(buildResponse(seq, result.error_code, result.body));
+          conn->send(std::move(wire));
+        });
+    return;
+  }
+  // 4) 找不到方法：释放已 claim 的占位，避免该 key 永久 in-flight。
+  LOG_WARN("RpcServer: method not found: %s.%s", service_name.c_str(),
+           method_name.c_str());
+  if (dedup_enabled)
+    idem->abort(cache_key);
+  std::string wire = encodeMessage(buildResponse(seq, -1, ""));
+  conn->send(std::move(wire));
+}
 void RpcServer::onConnection(spConnection conn) {
   LOG_INFO("RpcServer: new connection from %s:%d", conn->ip().c_str(),
            conn->port());
-  if (newConnectionCb_)
-    newConnectionCb_(conn);
 }
 
 void RpcServer::enableRegistry(const std::string &etcdEndpoints,
@@ -123,15 +248,6 @@ void RpcServer::enableRegistry(const std::string &etcdEndpoints,
                                int64_t tll) {
   registry_ = std::make_unique<ServiceRegistry>(etcdEndpoints, serviceName, ip,
                                                 port, tll);
-}
-
-void RpcServer::setCloseConnectionCallback(
-    std::function<void(spConnection)> cb) {
-  closeConnectionCb_ = std::move(cb);
-}
-
-void RpcServer::setNewConnectionCallback(std::function<void(spConnection)> cb) {
-  newConnectionCb_ = std::move(cb);
 }
 
 void RpcServer::setTimeoutCallback(std::function<void(EventLoop *)> cb) {

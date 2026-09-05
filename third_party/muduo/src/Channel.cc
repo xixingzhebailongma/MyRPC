@@ -1,7 +1,7 @@
 #include "../include/Channel.h"
-#include "Logger.h"
 #include "../include/EventLoop.h"
-Channel::Channel(EventLoop *loop, int fd) :  fd_(fd),loop_(loop) {}
+#include "Logger.h"
+Channel::Channel(EventLoop *loop, int fd) : fd_(fd), loop_(loop) {}
 
 Channel::~Channel() {}
 
@@ -48,54 +48,45 @@ void Channel::clearevent() {
   }
 }
 
-void Channel::remove(){
-    clearevent();
-    loop_->removechannel(this);
+void Channel::remove() {
+  clearevent();
+  loop_->removechannel(this);
 }
 
-void Channel::setinepoll(bool inepoll){
-    inepoll_ = inepoll;
-}
-void Channel::setrevents(uint32_t ev){
-    revents_ = ev;
-}
+void Channel::setinepoll(bool inepoll) { inepoll_ = inepoll; }
+void Channel::setrevents(uint32_t ev) { revents_ = ev; }
 
-bool Channel::inpoll(){
-    return inepoll_;
-}
+bool Channel::inpoll() { return inepoll_; }
 
-uint32_t Channel::events(){
-    return events_;
-}
+uint32_t Channel::events() { return events_; }
 
-uint32_t Channel::revents(){
-    return revents_;
-}
+uint32_t Channel::revents() { return revents_; }
 
-void Channel::handleevent(){
-    if(revents_&EPOLLRDHUP){
-        closecallback_();
-    }else if(revents_&(EPOLLIN|EPOLLPRI)){
-        readcallback_();
-    }else if(revents_&EPOLLOUT){
-        writecallback_();
-    }else{
+void Channel::handleevent()
+{
+    if (revents_ & EPOLLERR)
         errorcallback_();
-    }
+
+    if (revents_ & (EPOLLIN | EPOLLPRI | EPOLLRDHUP))
+        readcallback_();
+
+    if (revents_ & EPOLLOUT)
+        writecallback_();
+
+    if ((revents_ & EPOLLHUP) && !(revents_ & EPOLLIN))
+        closecallback_();
 }
 
-void Channel::setreadcallback(std::function<void()>fn){
-    readcallback_ = fn;
+void Channel::setreadcallback(std::function<void()> fn) { readcallback_ = fn; }
+
+void Channel::setclosecallback(std::function<void()> fn) {
+  closecallback_ = fn;
 }
 
-void Channel::setclosecallback(std::function<void()>fn){
-    closecallback_ = fn;
+void Channel::seterrorcallback(std::function<void()> fn) {
+  errorcallback_ = fn;
 }
 
-void Channel::seterrorcallback(std::function<void ()> fn){
-    errorcallback_ = fn;
-}
-
-void Channel::setwritecallback(std::function<void ()> fn){
-    writecallback_ = fn;
+void Channel::setwritecallback(std::function<void()> fn) {
+  writecallback_ = fn;
 }

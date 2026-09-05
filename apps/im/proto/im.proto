@@ -79,39 +79,61 @@ message ServerPushEnvelope{
  message SendMessageResponse { bool success = 1; string message = 2; string msg_id = 3; }
 
  // ========== 服务器间转发（Route Server用） ==========
+ message RouteServer {
+       string server_id = 1;   // 拆分后：承载 gateway_id（如 "GW1"）
+       string server_ip = 2;   // 拆分后：gateway 的 RPC 监听 IP
+       int32  server_port = 3; // 拆分后：gateway 的 RPC 监听 port
+       uint64 conn_id = 4;     // 新增：gateway 内的连接 ID
+   } 
+
  message RouteQueryRequest { string user_id = 1; }
  message RouteQueryResponse {
-     bool found= 1;
-     string server_id= 2;       // 如 "IM1"
-     string server_ip =3;
-     int32  server_port =4;
+     bool found = 1;
+     repeated RouteServer servers = 2;   // 该用户所有在线节点（多端跨节点）
  }
 
- message RouteRegisterRequest { 
-    string user_id = 1;
-     string server_id =2;
-     string server_ip = 3;
-     int32 server_port = 4;
-      }
+ message RouteRegisterRequest {
+      string user_id = 1;
+       string server_id =2;    // gateway_id
+       string server_ip = 3;   // gateway rpc ip
+       int32 server_port = 4;  // gateway rpc port
+       uint64 conn_id = 5;     // 新增
+        }
  message RouteRegisterResponse { bool success = 1; }
 
- message RouteUnregisterRequest { string user_id = 1; }
+message RouteUnregisterRequest {
+      string user_id = 1;
+      string server_id = 2;   // gateway_id
+      uint64 conn_id = 3;     // 新增：注销哪个连接
+   }
  message RouteUnregisterResponse { bool success =1; }
 
  // ========== 路由变更事件（Redis Pub/Sub 推送用） ==========
    message RouteChangeEvent {
        string user_id = 1;
        bool   online  = 2;   // true=登录/上线, false=下线/注销
-       string server_id = 3;
-       string server_ip  = 4;
-       int32  server_port = 5;
+       RouteServer server = 3;   // 增量：online 带 ip/port；offline 只需 server_id
    }
    
  // ========== 服务器间消息转发 ==========
  message ForwardMessageRequest { ChatMessage msg = 1; }
  message ForwardMessageResponse { bool success =1 ; }
 
+// ========== Gateway 回推 & 断线通知（拆分接入层后新增） ==========
+   // IM 节点 -> Gateway：把已打包的帧推给指定连接
+   message GatewayPushRequest {
+       uint64 conn_id = 1;
+       bytes  frame   = 2;      // 已打包好的 [4字节LE长度][ServerPushEnvelope]
+       bool   force_close = 3;  // true 时 Gateway 发完帧后 forceClose 该连接
+   }
+   message GatewayPushResponse { bool success = 1; }
 
+   // Gateway -> IM 节点：通知某连接已断开
+   message ClientDisconnectRequest {
+       string gateway_id = 1;
+       uint64 conn_id    = 2;
+   }   
+   message ClientDisconnectResponse { bool success = 1; }
 //加入消息可靠机制
 enum MessageStatus{
     SENDING = 0;    // 客户端已发送，等待服务端确认
@@ -198,3 +220,5 @@ message PendingMessageRecord{
      string target_id = 3;   // 可选，如被删的好友 id
      string reason = 4;      // 可选，踢下线原因文案
  }
+
+ 

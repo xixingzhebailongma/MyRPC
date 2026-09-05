@@ -25,17 +25,6 @@ struct EtcdConfig {
   std::string load_balancer =
       "round_robin"; // round_robin|pick_first|grpclb|xds
 
-  // TLS（留空 = 不启用）
-  std::string ca;
-  std::string cert;
-  std::string privkey;
-  std::string target_name_override;
-
-  // 认证（留空 = 不启用）
-  std::string username;
-  std::string password;
-  int auth_token_ttl = 300;
-
   // 幂等重试
   int max_retries = 3;     // 首次之外最多重试次数
   int retry_base_ms = 100; // 指数退避基数

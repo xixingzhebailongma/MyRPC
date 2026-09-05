@@ -108,10 +108,8 @@ void Logger::vlog(LogLevel level, const char *file, int line, const char *fmt,
   if (console_) {
     if (level >= LogLevel::ERROR) {
       std::cerr << log_line;
-      std::cerr.flush();
     } else {
       std::cout << log_line;
-      std::cout.flush();
     }
   }
 }

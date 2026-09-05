@@ -10,7 +10,7 @@ namespace sql {
 class Connection;
 }
 
-// MySQL 连接池：与 im/route/redis_pool.h 的 RedisPool 同一套设计。
+// MySQL 连接池：与 im/redis/redis_pool.h 的 RedisPool 同一套设计。
 // 线程安全；acquire() 借连接，Guard 析构自动归还；连接断了用 markBroken()
 // 丢弃。
 class MysqlPool {

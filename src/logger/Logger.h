@@ -33,21 +33,26 @@ public:
     int line_;
     std::ostringstream buf_;
   };
-  private:
-    Logger() = default;
-    ~Logger();
-    Logger(const Logger &) = delete;
-    Logger &operator=(const Logger &) = delete;
-    void vlog(LogLevel level, const char *file, int lien, const char *fmt,
-              va_list args);
-    std::mutex mutex_;
-    LogLevel level_{LogLevel::INFO};
-    bool console_{true};
-    bool fileLoggingEnabled_{false};
+
+private:
+  Logger() = default;
+  ~Logger();
+  Logger(const Logger &) = delete;
+  Logger &operator=(const Logger &) = delete;
+  void vlog(LogLevel level, const char *file, int lien, const char *fmt,
+            va_list args);
+  std::mutex mutex_;
+  LogLevel level_{LogLevel::INFO};
+  bool console_{false};
+  bool fileLoggingEnabled_{false};
 };
+#ifdef NDEBUG
+#define LOG_DEBUG(fmt, ...) ((void)0)
+#else
 #define LOG_DEBUG(fmt, ...)                                                    \
   Logger::instance().log(LogLevel::DEBUG, __FILE__, __LINE__, fmt,             \
                          ##__VA_ARGS__)
+#endif
 #define LOG_INFO(fmt, ...)                                                     \
   Logger::instance().log(LogLevel::INFO, __FILE__, __LINE__, fmt, ##__VA_ARGS__)
 #define LOG_WARN(fmt, ...)                                                     \

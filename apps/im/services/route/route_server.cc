@@ -17,18 +17,23 @@ RouteServer::RouteServer(const std::string &ip, uint16_t port,
   //    method_name, handler) conn-aware 版本接受
   //    std::function<std::string(spConnection, const std::string&)>
 
+  // 用 lambda 而非 std::bind：bind 表达式可吞掉多余实参，会同时匹配
+  // conn-aware 和 with-context 两个 registerMethod 重载而产生歧义。
   rpc_server_.serviceManager().registerMethod(
       service_name, "RouteRegister",
-      std::bind(&RouteServer::handleRouteRegister, this, std::placeholders::_1,
-                std::placeholders::_2));
+      [this](spConnection conn, const std::string &body) {
+        return handleRouteRegister(conn, body);
+      });
   rpc_server_.serviceManager().registerMethod(
       service_name, "RouteQuery",
-      std::bind(&RouteServer::handleRouteQuery, this, std::placeholders::_1,
-                std::placeholders::_2));
+      [this](spConnection conn, const std::string &body) {
+        return handleRouteQuery(conn, body);
+      });
   rpc_server_.serviceManager().registerMethod(
       service_name, "RouteUnregister",
-      std::bind(&RouteServer::handleRouteUnregister, this,
-                std::placeholders::_1, std::placeholders::_2));
+      [this](spConnection conn, const std::string &body) {
+        return handleRouteUnregister(conn, body);
+      });
   //...RouteQuery,RouteUnregister同理
   // 3.注册到etcd
   rpc_server_.enableRegistry(etcd_endpoints, service_name, ip, port, 30);
@@ -48,19 +53,21 @@ std::string RouteServer::handleRouteRegister(spConnection conn,
 
   std::string key = "im:route:" + req.user_id();
 
-  bool ok = true;
-  ok = ok && redis_.hset(key, "server_id", req.server_id());
-  ok = ok && redis_.hset(key, "server_ip", req.server_ip());
-  ok = ok && redis_.hset(key, "server_port", std::to_string(req.server_port()));
+  // field="gateway_id:conn_id", value="ip:port"：连接粒度，天然去重
+  std::string field = req.server_id() + ":" + std::to_string(req.conn_id());
+  std::string value = req.server_ip() + ":" + std::to_string(req.server_port());
+  bool ok = redis_.hset(key, field, value);
 
   // 路由变更：广播"上线"事件给所有 IM 节点，让其本地缓存即时预暖
   if (ok) {
     im::RouteChangeEvent ev;
     ev.set_user_id(req.user_id());
     ev.set_online(true);
-    ev.set_server_id(req.server_id());
-    ev.set_server_ip(req.server_ip());
-    ev.set_server_port(req.server_port());
+    auto *s = ev.mutable_server();
+    s->set_server_id(req.server_id());
+    s->set_server_ip(req.server_ip());
+    s->set_server_port(req.server_port());
+    s->set_conn_id(req.conn_id());
     std::string payload;
     ev.SerializeToString(&payload);
     redis_.publish("im:route:events", payload);
@@ -84,18 +91,28 @@ std::string RouteServer::handleRouteQuery(spConnection conn,
   }
 
   std::string key = "im:route:" + req.user_id();
-  std::string sid = redis_.hget(key, "server_id");
+  auto fields = redis_.hgetall(key); // field="gateway_id:conn_id", value="ip:port"
 
-  if (sid.empty()) {
+  if (fields.empty()) {
     resp.set_found(false);
   } else {
     resp.set_found(true);
-    resp.set_server_id(sid);
-    resp.set_server_ip(redis_.hget(key, "server_ip"));
-    // server_port存的是字符串，需要转回int32
-    std::string port_str = redis_.hget(key, "server_port");
-    if (!port_str.empty()) {
-      resp.set_server_port(std::stoi(port_str));
+    for (const auto &kv : fields) {
+      auto *s = resp.add_servers();
+      // field 格式 "gateway_id:conn_id"
+      auto pos = kv.first.rfind(':');
+      if (pos != std::string::npos) {
+        s->set_server_id(kv.first.substr(0, pos));            // gateway_id
+        s->set_conn_id(std::stoull(kv.first.substr(pos + 1))); // conn_id
+      } else {
+        s->set_server_id(kv.first); // 兼容无 conn_id 的旧数据
+      }
+      // value 格式 "ip:port"
+      auto pos2 = kv.second.rfind(':'); // IPv4 假设：ip 不含 ':'
+      if (pos2 != std::string::npos) {
+        s->set_server_ip(kv.second.substr(0, pos2));
+        s->set_server_port(std::stoi(kv.second.substr(pos2 + 1)));
+      }
     }
   }
   std::string result;
@@ -117,15 +134,20 @@ RouteServer::handleRouteUnregister(spConnection conn,
   }
 
   std::string key = "im:route:" + req.user_id();
-  redis_.del(key);
-  // 路由变更：通知各 IM 节点失效该用户的本地缓存
+  std::string field = req.server_id() + ":" + std::to_string(req.conn_id());
+  // 只删本连接字段，其它连接路由保留
+  bool ok = redis_.hdel(key, field);
+
+  // 路由变更：通知各 IM 节点从缓存移除该连接
   im::RouteChangeEvent ev;
   ev.set_user_id(req.user_id());
   ev.set_online(false);
+  ev.mutable_server()->set_server_id(req.server_id());
+  ev.mutable_server()->set_conn_id(req.conn_id());
   std::string payload;
   ev.SerializeToString(&payload);
   redis_.publish("im:route:events", payload);
-  resp.set_success(true);
+  resp.set_success(ok);
   std::string result;
   resp.SerializeToString(&result);
   return result;

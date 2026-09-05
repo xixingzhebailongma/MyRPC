@@ -12,7 +12,7 @@ set(CMAKE_CXX_FLAGS_RELEASE "-O2 -DNDEBUG")
 find_package(Threads REQUIRED)
 find_package(Protobuf REQUIRED)
 find_package(PkgConfig REQUIRED)
-
+find_package(OpenSSL REQUIRED)
 add_subdirectory(src/logger)
 add_subdirectory(third_party/muduo)
 add_subdirectory(src/protocol)

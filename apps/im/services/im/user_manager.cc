@@ -1,27 +1,28 @@
 #include "user_manager.h"
-#include "Connection.h"
+#include <chrono>
 #include <mutex>
-
+#include <shared_mutex>
 void UserManager::userOnline(const std::string &session_id,
                              const std::string &user_id,
                              const std::string &username,
                              const std::string &device_id, int device_type,
-                             std::shared_ptr<Connection> conn) {
-  std::lock_guard<std::mutex> lock(mutex_);
+                             const ClientConnRef &conn) {
+  std::unique_lock<std::shared_mutex> lock(mutex_);
   int64_t login_time = std::chrono::duration_cast<std::chrono::milliseconds>(
                            std::chrono::system_clock::now().time_since_epoch())
                            .count();
   SessionMeta meta{session_id,  user_id, username,  device_id,
                    device_type, conn,    login_time};
   sessions_[session_id] = std::move(meta);
-  fd_to_session_[conn->fd()] = session_id;
+  conn_key_to_session_[conn.key()] = session_id;
   user_to_sessions_[user_id].insert(session_id);
 }
 
-bool UserManager::userOfflineByFd(int fd, std::string *out_uid) {
-  std::lock_guard<std::mutex> lock(mutex_);
-  auto fit = fd_to_session_.find(fd);
-  if (fit == fd_to_session_.end()) {
+bool UserManager::userOfflineByConn(const std::string &conn_key,
+                                    std::string *out_uid) {
+  std::unique_lock<std::shared_mutex> lock(mutex_);
+  auto fit = conn_key_to_session_.find(conn_key);
+  if (fit == conn_key_to_session_.end()) {
     if (out_uid)
       *out_uid = "";
     return false; // 未认证连接关闭：无会话可清
@@ -33,7 +34,7 @@ bool UserManager::userOfflineByFd(int fd, std::string *out_uid) {
   if (sit != sessions_.end()) {
     user_id = sit->second.user_id;
   }
-  fd_to_session_.erase(fit);
+  conn_key_to_session_.erase(fit);
   if (sit != sessions_.end()) {
     sessions_.erase(sit);
   }
@@ -53,15 +54,15 @@ bool UserManager::userOfflineByFd(int fd, std::string *out_uid) {
 }
 
 bool UserManager::isOnline(const std::string &user_id) {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::shared_lock<std::shared_mutex> lock(mutex_);
   auto it = user_to_sessions_.find(user_id);
   return it != user_to_sessions_.end() && !it->second.empty();
 }
 
-std::vector<std::shared_ptr<Connection>>
+std::vector<ClientConnRef>
 UserManager::getConnections(const std::string &user_id) {
-  std::lock_guard<std::mutex> lock(mutex_);
-  std::vector<std::shared_ptr<Connection>> result;
+  std::shared_lock<std::shared_mutex> lock(mutex_);
+  std::vector<ClientConnRef> result;
   auto it = user_to_sessions_.find(user_id);
   if (it == user_to_sessions_.end())
     return result;
@@ -74,19 +75,11 @@ UserManager::getConnections(const std::string &user_id) {
   return result;
 }
 
-std::shared_ptr<Connection>
-UserManager::getConnectionBySession(const std::string &session_id) {
-  std::lock_guard<std::mutex> lock(mutex_);
-  auto it = sessions_.find(session_id);
-  if (it != sessions_.end())
-    return it->second.conn;
-  return nullptr;
-}
-
-std::string UserManager::getUserIdByFd(int fd) {
-  std::lock_guard<std::mutex> lock(mutex_);
-  auto fit = fd_to_session_.find(fd);
-  if (fit == fd_to_session_.end())
+std::string UserManager::getUserIdByConn(const std::string &gateway_id,
+                                         uint64_t conn_id) {
+  std::unique_lock<std::shared_mutex> lock(mutex_);
+  auto fit = conn_key_to_session_.find(makeKey(gateway_id, conn_id));
+  if (fit == conn_key_to_session_.end())
     return "";
   auto sit = sessions_.find(fit->second);
   if (sit == sessions_.end())
@@ -94,10 +87,12 @@ std::string UserManager::getUserIdByFd(int fd) {
   return sit->second.user_id;
 }
 
-std::string UserManager::getSessionIdByFd(int fd) {
-  std::lock_guard<std::mutex> lock(mutex_);
-  auto fit = fd_to_session_.find(fd);
-  if (fit == fd_to_session_.end())
-    return "";
-  return fit->second;
+size_t UserManager::onlineUserCount() {
+  std::shared_lock<std::shared_mutex> lock(mutex_);
+  return user_to_sessions_.size();
+}
+
+size_t UserManager::sessionCount() {
+  std::shared_lock<std::shared_mutex> lock(mutex_);
+  return sessions_.size();
 }

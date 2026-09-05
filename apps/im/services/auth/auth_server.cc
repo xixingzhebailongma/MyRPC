@@ -25,6 +25,9 @@ AuthServer::AuthServer(const std::string &ip, uint16_t port,
       service_name, "Login",
       std::bind(&AuthServer::handleLogin, this, std::placeholders::_1));
   rpc_server_.serviceManager().registerMethod(
+      service_name, "Register",
+      std::bind(&AuthServer::handleRegister, this, std::placeholders::_1));
+  rpc_server_.serviceManager().registerMethod(
       service_name, "VerifyToken",
       std::bind(&AuthServer::handleVerifyToken, this, std::placeholders::_1));
   rpc_server_.serviceManager().registerMethod(
@@ -81,6 +84,25 @@ std::string AuthServer::handleLogin(const std::string &request_body) {
   if (!session_store_.createSession(req, &resp)) {
     resp.set_success(false);
     resp.set_message("create session failed");
+  }
+  return resp.SerializeAsString();
+}
+
+std::string AuthServer::handleRegister(const std::string &request_body) {
+  auth::RegisterRequest req;
+  auth::RegisterResponse resp;
+  if (!req.ParseFromString(request_body)) {
+    resp.set_success(false);
+    resp.set_message("parse error");
+    return resp.SerializeAsString();
+  }
+  std::string err;
+  if (user_dao_.registerUser(req.username(), req.password(), &err)) {
+    resp.set_success(true);
+    resp.set_message("register ok");
+  } else {
+    resp.set_success(false);
+    resp.set_message(err.empty() ? "register failed" : err);
   }
   return resp.SerializeAsString();
 }
@@ -161,7 +183,8 @@ std::string AuthServer::handleResolveTicket(const std::string &request_body) {
     return resp.SerializeAsString();
   }
   auth::SessionInfo session;
-  if (session_store_.resolveTicket(req.ticket(), &session)) {
+  if (session_store_.resolveTicket(req.ticket(), req.gateway_id(),
+                                   req.conn_id(), &session)) {
     resp.set_valid(true);
     *resp.mutable_session() = std::move(session);
   } else {
@@ -220,7 +243,7 @@ void AuthServer::onUserChanged(const std::string &payload) {
   if (!ev.ParseFromString(payload)) {
     return;
   }
-  // 只有这些事件会导致会话失效；FRIEND_REMOVED 等不吊销会话
+
   // 只有这些事件会导致会话失效；FRIEND_REMOVED 等不吊销会话
   switch (ev.type()) {
   case im::UserChangedEvent::PASSWORD_CHANGED:

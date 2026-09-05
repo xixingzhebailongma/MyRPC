@@ -33,12 +33,8 @@ MessageStore::requestKey(const std::string &from_user_id,
                          const std::string &client_request_id) const {
   return "msg:req:" + from_user_id + ":" + client_request_id;
 }
-std::string MessageStore::pendingQueueKey() const {
-  return "msg:pending:" + server_id_;
-}
-
-std::string MessageStore::pendingRecordKey(const std::string &msg_id) const {
-  return "msg:pending:rec:" + server_id_ + ":" + msg_id;
+std::string MessageStore::retryKey(const std::string &entry_id) const {
+  return "msg:retry:" + entry_id;
 }
 std::string MessageStore::offlineKey(const std::string &user_id) const {
   return "msg:offline:" + user_id;
@@ -49,8 +45,8 @@ std::string MessageStore::statusKey(const std::string &msg_id) const {
 }
 
 // ========== 构造 & 连接 ==========
-MessageStore::MessageStore(const std::string &server_id)
-    : server_id_(server_id) {}
+MessageStore::MessageStore(const std::string &server_id, uint64_t worker_id)
+    : server_id_(server_id), worker_id_(worker_id & kMaxWorkerId) {}
 
 bool MessageStore::connect(const std::string &redis_ip, int redis_port) {
   bool ok = redis_.connect(redis_ip, redis_port);
@@ -70,22 +66,29 @@ bool MessageStore::publish(const std::string &channel, const std::string &msg) {
 
 //========== 去重 ==========
 
-bool MessageStore::tryClaimRequest(const std::string &from_user_id,
-                                   const std::string &client_request_id,
-                                   const std::string &msg_id,
-                                   std::string *existing_msg_id, int ttl_sec) {
+MessageStore::ClaimResult MessageStore::tryClaimRequest(
+    const std::string &from_user_id, const std::string &client_request_id,
+    const std::string &msg_id, std::string *existing_msg_id, int ttl_sec) {
   std::string key = requestKey(from_user_id, client_request_id);
-  // 首次处理：SETNX 成功，值存真实 msg_id，供重复请求取回
-  bool first = redis_.setnx(key, msg_id);
-  if (first) {
-    redis_.expire(key, ttl_sec);
-    return true;
+  // 首次处理：原子 SET NX EX，值存真实 msg_id，供重复请求取回
+  SetResult r = redis_.setNxEx(key, msg_id, ttl_sec);
+  if (r == SetResult::kSet) {
+    return ClaimResult::kFirst;
   }
-  // 重复请求：取回之前分配的 msg_id，保证响应幂等
+  if (r == SetResult::kError) {
+    // Redis 不可用：不当作重复，交由上层返回失败，避免静默丢消息
+    return ClaimResult::kError;
+  }
+  // kExists：重复请求，取回之前分配的 msg_id，保证响应幂等
   if (existing_msg_id) {
     *existing_msg_id = redis_.get(key);
   }
-  return false;
+  return ClaimResult::kDuplicate;
+}
+
+bool MessageStore::releaseRequestClaim(const std::string &from_user_id,
+                                       const std::string &client_request_id) {
+  return redis_.del(requestKey(from_user_id, client_request_id));
 }
 
 // ========== 离线消息 ==========
@@ -99,13 +102,10 @@ bool MessageStore::storeOfflineMessage(const std::string &user_id,
     return false;
   }
   std::string key = offlineKey(user_id);
-  bool ok = redis_.lpush(key, data);
-  // 滑动窗口：每次写入刷新 TTL，用户长期不登录时整条列表被回收
-  if (ok && !redis_.expire(key, ttl_sec)) {
-    LOG_ERROR("MessageStore: failed to set TTL on offline list for user %s",
-              user_id.c_str());
-  }
-  return ok;
+  // LPUSH + 滑动窗口刷新 TTL，合并成 1 次 RTT
+  auto pipe = redis_.pipeline();
+  pipe.lpush(key, data).expire(key, ttl_sec);
+  return pipe.flush();
 }
 
 std::vector<im::ChatMessage>
@@ -139,8 +139,9 @@ void MessageStore::markStatus(const std::string &msg_id,
                               im::MessageStatus status) {
   std::string key = statusKey(msg_id);
   std::string value = std::to_string(static_cast<int>(status));
-  redis_.set(key, value);
-  redis_.expire(key, 86400);
+  auto pipe = redis_.pipeline();
+  pipe.set(key, value).expire(key, 86400);
+  pipe.flush();
 }
 
 im::MessageStatus MessageStore::getStatus(const std::string &msg_id) {
@@ -162,98 +163,49 @@ im::MessageStatus MessageStore::getStatus(const std::string &msg_id) {
 
 // ========== ID 生成 ==========
 
+uint64_t MessageStore::nowMs() const {
+  return static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::system_clock::now().time_since_epoch())
+          .count());
+}
+
 std::string MessageStore::generateMsgId() {
-  int64_t counter = redis_.incr(kIdCounterKey);
-  if (counter < 0) {
-    LOG_ERROR("MessageStore: INCR failed for message ID counter");
-    return ""; // 失败返回空字符串，调用方需检查
-  }
-  return server_id_ + "_" + std::to_string(counter);
-}
+  std::lock_guard<std::mutex> lock(id_mutex_);
+  uint64_t now = nowMs();
 
-// ========== 待确认队列（pending） ==========
-bool MessageStore::addPending(const im::ChatMessage &msg, int64_t next_retry_ms,
-                              int ttl_sec) {
-  im::PendingMessageRecord record;
-  *record.mutable_msg() = msg;
-  record.set_retry_count(0); // 首次加入，重试次数为 0
-
-  std::string data;
-  if (!record.SerializeToString(&data)) {
-    LOG_ERROR("MessageStore: failed to serialize pending record for %s",
-              msg.msg_id().c_str());
-    return false;
+  // 时钟回拨保护：等待系统时间追平上一次生成时间戳，避免产生重复 ID
+  while (now < last_timestamp_ms_) {
+    now = nowMs();
   }
-  // ZADD：member=msg_id，score=下次重试时间（覆盖语义，重复加入也没关系）
-  if (!redis_.zadd(pendingQueueKey(), static_cast<double>(next_retry_ms),
-                   msg.msg_id())) {
-    return false;
-  }
-  if (!redis_.set(pendingRecordKey(msg.msg_id()), data)) {
-    return false;
-  }
-  redis_.expire(pendingRecordKey(msg.msg_id()),
-                ttl_sec); // 兜底：防止孤儿 record 永久残留
-  return true;
-}
 
-std::vector<im::PendingMessageRecord>
-MessageStore::fetchDuePending(int64_t now_ms, int limit) {
-  // 拉出所有 score <= now_ms 的 member（即 msg_id）
-  std::vector<std::string> due_ids = redis_.zrangebyscore(
-      pendingQueueKey(), 0, static_cast<double>(now_ms), limit);
-  std::vector<im::PendingMessageRecord> result;
-  result.reserve(due_ids.size());
-
-  for (const auto &id : due_ids) {
-    std::string data = redis_.get(pendingRecordKey(id));
-    if (data.empty()) {
-      // record 已丢失，member 成为僵尸：从 zset 移除，避免永久泄漏
-      redis_.zrem(pendingQueueKey(), id);
-      LOG_INFO("MessageStore: removed zombie pending member %s", id.c_str());
-      continue;
+  if (now == last_timestamp_ms_) {
+    sequence_ = (sequence_ + 1) & kSequenceMask;
+    if (sequence_ == 0) {
+      // 同一毫秒内序列耗尽（>4096/ms），自旋等到下一毫秒
+      do {
+        now = nowMs();
+      } while (now <= last_timestamp_ms_);
     }
-    im::PendingMessageRecord record;
-    if (record.ParseFromString(data)) {
-      result.push_back(std::move(record));
-    } else {
-      // 解析失败：坏 record 同样会永久卡住，一并清理
-      LOG_ERROR("MessageStore: failed to parse pending record for %s",
-                id.c_str());
-      redis_.zrem(pendingQueueKey(), id);
-      redis_.del(pendingRecordKey(id));
-    }
+  } else {
+    sequence_ = 0;
   }
-  return result;
+  last_timestamp_ms_ = now;
+
+  uint64_t id = ((now - kEpochMs) << kTimestampShift) |
+                ((worker_id_ & kMaxWorkerId) << kWorkerIdShift) | sequence_;
+  return std::to_string(id);
 }
 
-bool MessageStore::updatePending(const im::ChatMessage &msg, int retry_count,
-                                 int64_t next_retry_ms, int ttl_sec) {
-  im::PendingMessageRecord record;
-  *record.mutable_msg() = msg;
-  record.set_retry_count(retry_count);
-
-  std::string data;
-  if (!record.SerializeToString(&data)) {
-    LOG_ERROR("MessageStore: failed to serialize pending record for %s",
-              msg.msg_id().c_str());
-    return false;
+// ========== 重试计数（deliver_server 用，key 按 stream entry_id 隔离）
+// ==========
+int64_t MessageStore::incrementRetryCount(const std::string &entry_id,
+                                          int ttl_sec) {
+  std::string key = retryKey(entry_id);
+  int64_t n = redis_.incr(key);
+  if (n > 0) {
+    // 每次自增刷新 TTL：消息收尾后 side key 会随 TTL 自动过期，不残留
+    redis_.expire(key, ttl_sec);
   }
-
-  // ZADD 用同一 member 重新写入 = 覆盖 score（延期到新的到期时间）
-  if (!redis_.zadd(pendingQueueKey(), static_cast<double>(next_retry_ms),
-                   msg.msg_id())) {
-    return false;
-  }
-  if (!redis_.set(pendingRecordKey(msg.msg_id()), data)) {
-    return false;
-  }
-  redis_.expire(pendingRecordKey(msg.msg_id()), ttl_sec); // 每次重试刷新兜底
-  return true;
-}
-
-bool MessageStore::removePending(const std::string &msg_id) {
-  bool ok1 = redis_.zrem(pendingQueueKey(), msg_id);
-  bool ok2 = redis_.del(pendingRecordKey(msg_id));
-  return ok1 && ok2;
+  return n;
 }

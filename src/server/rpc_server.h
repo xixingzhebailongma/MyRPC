@@ -7,7 +7,9 @@
 #include "service_manager.h"
 #include "service_registry.h"
 #include <functional>
-class ServiceRegistry; //前向声明,不需要#include
+#include <memory>
+class ServiceRegistry;  //前向声明,不需要#include
+class IdempotencyStore; // 新增：幂等存储前向声明
 
 class RpcServer {
 public:
@@ -24,24 +26,21 @@ public:
   void enableRegistry(const std::string &etcdEndpoints,
                       const std::string &serviceName, const std::string &ip,
                       uint16_t port, int64_t ttl = 30);
-
+  //注入幂等存储(在start()之前调用)。默认已构造为 IdempotencyLru。
+  void setIdempotencyStore(std::unique_ptr<IdempotencyStore> store);
   ServiceManager &serviceManager() { return serviceMgr_; }
-  void setCloseConnectionCallback(std::function<void(spConnection)> cb);
-  // 新连接建立回调（在 onConnection 内触发），与 setCloseConnectionCallback
-  // 对称
-  void setNewConnectionCallback(std::function<void(spConnection)> cb);
   void setTimeoutCallback(std::function<void(EventLoop *)> cb);
   void setPeriodTimer(double interval, std::function<void(EventLoop *)> cb);
   void setIdleTimeout(double seconds);
 
 private:
-  void onMessage(spConnection conn, std::string &message);
+  void onMessage(spConnection conn, Buffer &buf);
+  void dispatch(spConnection conn, std::string payload);
   void onConnection(spConnection conn);
 
   TcpServer server_;
   ThreadPool workPool_; //声明在server_之后
   ServiceManager serviceMgr_;
   std::unique_ptr<ServiceRegistry> registry_;
-  std::function<void(spConnection)> closeConnectionCb_;
-  std::function<void(spConnection)> newConnectionCb_;
+  std::unique_ptr<IdempotencyStore> idemStore_; // 新增
 };
