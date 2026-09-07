@@ -20,13 +20,19 @@ public:
       3000; // 保留原值：无数据时每 3s 也 flush 一次
   static constexpr size_t kHistBuckets = 8; // 直方图桶数
   static constexpr size_t kMaxBatch = 1024; // 消费者每次 drain 最多写多少条
-  static constexpr bool kDropOnOverflow =
-      false; // 兜底开关：true 则满载超时后丢弃
 
   static AsyncLogger &instance();
   void start(const std::string &filePath);
   void stop();
   void append(const char *data, size_t len);
+
+  // 丢弃策略运行时可配置：true=满载超时后丢弃（默认，保证业务线程不被拖死）
+  void setDropOnOverflow(bool v) {
+    dropOnOverflow_.store(v, std::memory_order_relaxed);
+  }
+  bool dropOnOverflow() const {
+    return dropOnOverflow_.load(std::memory_order_relaxed);
+  }
 
   // 监控指标 getter（供运维/压测读取）
   uint64_t logsDropped() const;
@@ -53,6 +59,7 @@ private:
   std::ofstream file_;
   std::unique_ptr<std::thread> thread_;
   std::atomic<bool> running_{false};
+  std::atomic<bool> dropOnOverflow_{true}; // 丢弃策略（运行时可切换）
 
   // 指标（全部 atomic，生产者热路径只需 relaxed 加减，无锁）
   std::atomic<uint64_t> dropped_{0};         // 丢弃的日志条数

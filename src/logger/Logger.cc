@@ -7,7 +7,6 @@
 #include <iostream>
 #include <sys/syscall.h>
 #include <unistd.h>
-
 static const char *levelLabel(LogLevel lv) {
   switch (lv) {
   case LogLevel::DEBUG:
@@ -43,12 +42,14 @@ Logger &Logger::instance() {
 
 Logger::~Logger() = default;
 
-void Logger::init(LogLevel level, const std::string &logFile, bool console) {
+void Logger::init(LogLevel level, const std::string &logFile, bool console,
+                  bool dropOnOverflow) {
   std::lock_guard<std::mutex> lock(mutex_);
   level_ = level;
   console_ = console;
 
   if (!logFile.empty()) {
+    AsyncLogger::instance().setDropOnOverflow(dropOnOverflow);
     AsyncLogger::instance().start(logFile);
     fileLoggingEnabled_ = true;
   }

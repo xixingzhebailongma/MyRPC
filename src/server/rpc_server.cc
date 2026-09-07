@@ -98,8 +98,10 @@ void RpcServer::dispatch(spConnection conn, std::string payload) {
   // 应用层心跳：按 type 识别，走 workPool_ 应答 pong（业务线程池打满时心跳也
   // 答不上，客户端才能探测到“进程活着但服务卡死”），任务本身极小。
   if (header.type() == MessageType::MSG_HEARTBEAT) {
-    workPool_.addtask(
-        [conn, seq]() { conn->send(encodeMessage(buildHeartbeatAck(seq))); });
+    if (!workPool_.tryAdd([conn, seq]() {
+          conn->send(encodeMessage(buildHeartbeatAck(seq)));
+        }))
+      LOG_WARN("RpcServer: work pool full, dropping heartbeat seq=%lu", seq);
     return;
   }
 
@@ -133,14 +135,15 @@ void RpcServer::dispatch(spConnection conn, std::string payload) {
   auto handlerWithContext =
       serviceMgr_.findMethodWithContext(service_name, method_name);
   if (handlerWithContext) {
-    workPool_.addtask([conn, handlerWithContext, seq, body, hdr, dedup_enabled,
-                       cache_key, idem]() {
-      std::string resp = handlerWithContext(conn, body, hdr);
-      if (dedup_enabled)
-        idem->complete(cache_key, resp);
-      std::string wire = encodeMessage(buildResponse(seq, 0, resp));
-      conn->send(std::move(wire));
-    });
+    if (!workPool_.tryAdd([conn, handlerWithContext, seq, body, hdr,
+                           dedup_enabled, cache_key, idem]() {
+          std::string resp = handlerWithContext(conn, body, hdr);
+          if (dedup_enabled)
+            idem->complete(cache_key, resp);
+          std::string wire = encodeMessage(buildResponse(seq, 0, resp));
+          conn->send(std::move(wire));
+        }))
+      rejectOverloaded(conn, seq, dedup_enabled, cache_key, idem);
     return;
   }
 
@@ -148,28 +151,30 @@ void RpcServer::dispatch(spConnection conn, std::string payload) {
   auto handlerWithConn =
       serviceMgr_.findMethodWithConn(service_name, method_name);
   if (handlerWithConn) {
-    workPool_.addtask(
-        [conn, handlerWithConn, seq, body, dedup_enabled, cache_key, idem]() {
+    if (!workPool_.tryAdd([conn, handlerWithConn, seq, body, dedup_enabled,
+                           cache_key, idem]() {
           std::string resp = handlerWithConn(conn, body);
           if (dedup_enabled)
             idem->complete(cache_key, resp);
           std::string wire = encodeMessage(buildResponse(seq, 0, resp));
           conn->send(std::move(wire));
-        });
+        }))
+      rejectOverloaded(conn, seq, dedup_enabled, cache_key, idem);
     return;
   }
 
   // 3) 最后查找普通 handler
   auto handler = serviceMgr_.findMethod(service_name, method_name);
   if (handler) {
-    workPool_.addtask(
-        [conn, handler, seq, body, dedup_enabled, cache_key, idem]() {
-          std::string resp = handler(body);
-          if (dedup_enabled)
-            idem->complete(cache_key, resp);
-          std::string wire = encodeMessage(buildResponse(seq, 0, resp));
-          conn->send(std::move(wire));
-        });
+    if (!workPool_.tryAdd(
+            [conn, handler, seq, body, dedup_enabled, cache_key, idem]() {
+              std::string resp = handler(body);
+              if (dedup_enabled)
+                idem->complete(cache_key, resp);
+              std::string wire = encodeMessage(buildResponse(seq, 0, resp));
+              conn->send(std::move(wire));
+            }))
+      rejectOverloaded(conn, seq, dedup_enabled, cache_key, idem);
     return;
   }
   // 结果型 handler（带 error_code）：成功才缓存；失败 abort
@@ -177,45 +182,47 @@ void RpcServer::dispatch(spConnection conn, std::string payload) {
   auto handlerWithContextResult =
       serviceMgr_.findMethodWithContextResult(service_name, method_name);
   if (handlerWithContextResult) {
-    workPool_.addtask([conn, handlerWithContextResult, seq, body, hdr,
-                       dedup_enabled, cache_key, idem]() {
-      RpcMethodResult result = handlerWithContextResult(conn, body, hdr);
-      if (dedup_enabled) {
-        if (result.error_code == 0)
-          idem->complete(cache_key, result.body);
-        else
-          idem->abort(cache_key); // 失败不缓存，客户端重试会真正重执行
-      }
-      std::string wire =
-          encodeMessage(buildResponse(seq, result.error_code, result.body));
-      conn->send(std::move(wire));
-    });
+    if (!workPool_.tryAdd([conn, handlerWithContextResult, seq, body, hdr,
+                           dedup_enabled, cache_key, idem]() {
+          RpcMethodResult result = handlerWithContextResult(conn, body, hdr);
+          if (dedup_enabled) {
+            if (result.error_code == 0)
+              idem->complete(cache_key, result.body);
+            else
+              idem->abort(cache_key); // 失败不缓存，客户端重试会真正重执行
+          }
+          std::string wire =
+              encodeMessage(buildResponse(seq, result.error_code, result.body));
+          conn->send(std::move(wire));
+        }))
+      rejectOverloaded(conn, seq, dedup_enabled, cache_key, idem);
     return;
   }
 
   auto handlerWithConnResult =
       serviceMgr_.findMethodWithConnResult(service_name, method_name);
   if (handlerWithConnResult) {
-    workPool_.addtask([conn, handlerWithConnResult, seq, body, dedup_enabled,
-                       cache_key, idem]() {
-      RpcMethodResult result = handlerWithConnResult(conn, body);
-      if (dedup_enabled) {
-        if (result.error_code == 0)
-          idem->complete(cache_key, result.body);
-        else
-          idem->abort(cache_key);
-      }
-      std::string wire =
-          encodeMessage(buildResponse(seq, result.error_code, result.body));
-      conn->send(std::move(wire));
-    });
+    if (!workPool_.tryAdd([conn, handlerWithConnResult, seq, body,
+                           dedup_enabled, cache_key, idem]() {
+          RpcMethodResult result = handlerWithConnResult(conn, body);
+          if (dedup_enabled) {
+            if (result.error_code == 0)
+              idem->complete(cache_key, result.body);
+            else
+              idem->abort(cache_key);
+          }
+          std::string wire =
+              encodeMessage(buildResponse(seq, result.error_code, result.body));
+          conn->send(std::move(wire));
+        }))
+      rejectOverloaded(conn, seq, dedup_enabled, cache_key, idem);
     return;
   }
 
   auto handlerResult = serviceMgr_.findMethodResult(service_name, method_name);
   if (handlerResult) {
-    workPool_.addtask(
-        [conn, handlerResult, seq, body, dedup_enabled, cache_key, idem]() {
+    if (!workPool_.tryAdd([conn, handlerResult, seq, body, dedup_enabled,
+                           cache_key, idem]() {
           RpcMethodResult result = handlerResult(body);
           if (dedup_enabled) {
             if (result.error_code == 0)
@@ -226,7 +233,8 @@ void RpcServer::dispatch(spConnection conn, std::string payload) {
           std::string wire =
               encodeMessage(buildResponse(seq, result.error_code, result.body));
           conn->send(std::move(wire));
-        });
+        }))
+      rejectOverloaded(conn, seq, dedup_enabled, cache_key, idem);
     return;
   }
   // 4) 找不到方法：释放已 claim 的占位，避免该 key 永久 in-flight。
@@ -237,6 +245,17 @@ void RpcServer::dispatch(spConnection conn, std::string payload) {
   std::string wire = encodeMessage(buildResponse(seq, -1, ""));
   conn->send(std::move(wire));
 }
+
+void RpcServer::rejectOverloaded(spConnection conn, uint64_t seq,
+                                 bool dedup_enabled,
+                                 const std::string &cache_key,
+                                 IdempotencyStore *idem) {
+  if (dedup_enabled)
+    idem->abort(cache_key); // 释放已 claim 的 in-flight 占位，让客户端可重试
+  LOG_WARN("RpcServer: work pool full, rejecting seq=%lu (overloaded)", seq);
+  conn->send(encodeMessage(buildResponse(seq, kErrServerOverloaded, "")));
+}
+
 void RpcServer::onConnection(spConnection conn) {
   LOG_INFO("RpcServer: new connection from %s:%d", conn->ip().c_str(),
            conn->port());

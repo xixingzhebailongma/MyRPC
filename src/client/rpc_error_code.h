@@ -13,6 +13,8 @@ enum class RpcError : int32_t {
   CIRCUIT_OPEN = 10004,       // 熔断快速失败
   SERVER_ERROR = 10005,       // 响应缺失 / 解析失败
   NO_AVAILABLE_NODE = 10006,  // 无可用节点 / 全部熔断
+  SERVER_OVERLOADED =
+      10007, // 服务端工作队列满、拒绝请求（临时性错误，客户端应 failover 重试）
   UNKNOWN = 10999,
 };
 
@@ -33,6 +35,8 @@ inline const char *rpcErrorName(RpcError e) {
     return "SERVER_ERROR";
   case RpcError::NO_AVAILABLE_NODE:
     return "NO_AVAILABLE_NODE";
+  case RpcError::SERVER_OVERLOADED:
+    return "SERVER_OVERLOADED";
   case RpcError::UNKNOWN:
     return "UNKNOWN";
   }
@@ -54,6 +58,7 @@ inline bool isRetryable(int32_t code) {
   case static_cast<int32_t>(RpcError::CONNECTION_REFUSED):
   case static_cast<int32_t>(RpcError::CONNECTION_BROKEN):
   case static_cast<int32_t>(RpcError::CIRCUIT_OPEN):
+  case static_cast<int32_t>(RpcError::SERVER_OVERLOADED):
     return true;
   default:
     return code >= kRetryableBusinessErrorMin &&

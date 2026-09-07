@@ -4,10 +4,12 @@ set(MUDUO_SOURCES
     src/Channel.cc
 
     src/Connection.cc
+    src/Connector.cc
     src/Epoll.cc
     src/EventLoop.cc
     src/Socket.cc
     src/TcpServer.cc
+    src/TcpClient.cc
     src/ThreadPool.cc
     src/InetAddress.cc
     src/TimerQueue.cc
