@@ -37,6 +37,8 @@ private:
   void onMessage(spConnection conn, Buffer &buf);
   void dispatch(spConnection conn, std::string payload);
   void onConnection(spConnection conn);
+  void rejectOverloaded(spConnection conn, uint64_t seq, bool dedup_enabled,
+                        const std::string &cache_key, IdempotencyStore *idem);
 
   TcpServer server_;
   ThreadPool workPool_; //声明在server_之后

@@ -9,6 +9,11 @@
 constexpr uint32_t kHeaderLen = 4;
 constexpr uint32_t kMaxMessageLen = 64u << 20; // 64MB，超过视为非法帧
 
+// 框架错误码：服务端工作队列满、拒绝请求（临时性错误，客户端应 failover
+// 重试）。 与 src/client/rpc_error_code.h 的 RpcError::SERVER_OVERLOADED
+// 同值，保持同步。
+constexpr int32_t kErrServerOverloaded = 10007;
+
 // ===== 编解码（成对、对称）=====
 
 // 编码：RpcMessage -> 完整帧（序列化 + 加 4 字节长度头）

@@ -42,6 +42,17 @@ void ThreadPool::addtask(std::function<void()> task) {
   notEmpty_.notify_one();
 }
 
+bool ThreadPool::tryAdd(std::function<void()> task) {
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (stop_ == true || taskqueue_.size() >= maxQueueSize_)
+      return false; // 满或已停止：不阻塞，直接拒绝
+    taskqueue_.push(std::move(task));
+  }
+  notEmpty_.notify_one();
+  return true;
+}
+
 void ThreadPool::stop() {
   if (stop_)
     return;

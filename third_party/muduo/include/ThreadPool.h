@@ -29,7 +29,9 @@ public:
              size_t maxQueueSize = 8192);
 
   void addtask(std::function<void()> task); // 满时阻塞；stop 后丢弃并返回
-  size_t size();                            // 线程数（保持原语义）
+  bool tryAdd(std::function<void()> task);
+  // 非阻塞投递：满/已 stop 返回 false；供 IO 线程使用
+  size_t size();         // 线程数（保持原语义）
   size_t pendingTasks(); // 当前排队任务数（观测/测试用）
   void stop();
   ~ThreadPool();

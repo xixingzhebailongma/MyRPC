@@ -54,7 +54,7 @@ bool AsyncLogger::enqueue(std::string &&line) {
     }
     if (!ok) { // 超时仍满 → 兜底
       onQueueOverflow();
-      if (kDropOnOverflow) { // 运维兜底开关：true 则丢弃
+      if (dropOnOverflow_.load(std::memory_order_relaxed)) { // true 则丢弃
         recordFullWait(elapsedUs(t0));
         ++dropped_;
         return false;
@@ -69,7 +69,7 @@ void AsyncLogger::onQueueOverflow() {
     // 只写 stderr，绝不走 append()，否则队列仍满会递归阻塞
     std::cerr << "[AsyncLogger] WARNING: log queue full >" << kBlockTimeoutMs
               << "ms, disk writer falling behind";
-    if (kDropOnOverflow)
+    if (dropOnOverflow_.load(std::memory_order_relaxed))
       std::cerr << " (dropping logs)";
     std::cerr << std::endl;
   }

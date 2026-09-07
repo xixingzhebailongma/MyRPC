@@ -3,6 +3,7 @@
 #include <atomic>
 #include <chrono>
 #include <csignal>
+#include <cstdlib>   // std::getenv
 #include <string>
 #include <thread>
 
@@ -11,7 +12,12 @@ std::atomic<bool> running{true};
 void signalHandler(int) { running = false; }
 
 int main(int argc, char *argv[]) {
-  Logger::instance().init(LogLevel::DEBUG, "deliver_server.log", true);
+  // 环境变量 MYRPC_LOG_DROP_ON_OVERFLOW：未设置=丢弃（默认）；设为 "0"=阻塞（不丢日志）
+  bool drop_on_overflow = true;
+  if (const char *env = std::getenv("MYRPC_LOG_DROP_ON_OVERFLOW"))
+    drop_on_overflow = (std::string(env) != "0");
+  Logger::instance().init(LogLevel::DEBUG, "deliver_server.log", true,
+                          drop_on_overflow);
 
   std::string server_id = "deliver";
   uint64_t worker_id = 0;

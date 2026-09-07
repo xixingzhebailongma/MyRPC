@@ -91,9 +91,11 @@ void GatewayServer::onConnectionClosed(spConnection conn) {
   }
   // 已固定到某 IM 节点：异步通知其清理会话（别阻塞 IO 线程）
   if (!im_ip.empty()) {
-    work_pool_.addtask([this, conn_id, im_ip, im_port] {
-      notifyDisconnect(conn_id, im_ip, im_port);
-    });
+    if (!work_pool_.tryAdd([this, conn_id, im_ip, im_port] {
+          notifyDisconnect(conn_id, im_ip, im_port);
+        }))
+      LOG_WARN("Gateway: work pool full, dropping disconnect notify conn=%llu",
+               (unsigned long long)conn_id);
   }
 }
 
@@ -114,9 +116,11 @@ void GatewayServer::onClientMessage(spConnection conn, Buffer &buf) {
         tryDecodeFrame(buf.peek(), buf.readableBytes(), &frame_len, &payload);
     if (r == FrameDecode::kOk) {
       buf.retrieve(frame_len);
-      // 阻塞 RPC 转发丢到工作线程
-      work_pool_.addtask(
-          [this, conn_id, payload] { forwardToIm(conn_id, payload); });
+      // 非阻塞转发：满则丢弃，由 IM 离线消息/Ack 机制补偿
+      if (!work_pool_.tryAdd(
+              [this, conn_id, payload] { forwardToIm(conn_id, payload); }))
+        LOG_WARN("Gateway: work pool full, dropping client msg conn=%llu",
+                 (unsigned long long)conn_id);
     } else if (r == FrameDecode::kError) {
       conn->forceClose();
       return;
