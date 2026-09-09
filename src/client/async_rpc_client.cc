@@ -45,6 +45,17 @@ AsyncRpcClient::getOrCreate(const std::string &ip, uint16_t port) {
     return it->second;
   EventLoop *loop = loops_[std::hash<std::string>{}(key) % loops_.size()].get();
   auto ch = std::make_shared<AsyncRpcChannel>(loop, ip, port, cfg_);
+  ch->setIdleExpiredCallback(
+      [this, key](std::shared_ptr<AsyncRpcChannel> self) {
+        {
+          std::lock_guard<std::mutex> lk(mutex_);
+          auto it = channels_.find(key);
+          if (it != channels_.end() && it->second == self)
+            channels_.erase(it);
+        }
+        self->close();
+      });
+  ch->setIdleTimeout(cfg_.channel_idle_ttl_ms);
   channels_[key] = ch;
   return ch;
 }
@@ -67,4 +78,26 @@ void AsyncRpcClient::stop() {
   for (auto &t : threads_)
     if (t.joinable())
       t.join();
+}
+
+size_t AsyncRpcClient::size() {
+  std::lock_guard<std::mutex> lk(mutex_);
+  return channels_.size();
+}
+
+void AsyncRpcClient::removeExcept(const std::unordered_set<std::string> &keep) {
+  std::vector<std::shared_ptr<AsyncRpcChannel>> to_close;
+  {
+    std::lock_guard<std::mutex> lk(mutex_);
+    for (auto it = channels_.begin(); it != channels_.end();) {
+      if (!keep.count(it->first)) {
+        to_close.push_back(it->second);
+        it = channels_.erase(it);
+      } else {
+        ++it;
+      }
+    }
+  }
+  for (auto &ch : to_close)
+    ch->close();
 }

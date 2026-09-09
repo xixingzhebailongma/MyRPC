@@ -24,7 +24,7 @@ ImServer::ImServer(const std::string &ip, int port,
                    const std::string &etcd_endpoints,
                    const std::string &redis_ip, int redis_port,
                    const DbConfig &db_cfg, const std::string &auth_service,
-                   bool auth_enabled, const std::string &shared_secret)
+                   const std::string &shared_secret)
     : rpc_server_(ip, port), message_store_(server_id, worker_id),
       route_client_(etcd_endpoints, route_service,
                     std::make_shared<ConsistentHashBalancer>(150)),
@@ -32,7 +32,7 @@ ImServer::ImServer(const std::string &ip, int port,
                    std::make_shared<RoundRobinBalancer>()),
       server_id_(server_id), ip_(ip), port_(port), redis_ip_(redis_ip),
       redis_port_(redis_port), auth_service_(auth_service),
-      auth_enabled_(auth_enabled), shared_secret_(shared_secret) {
+      shared_secret_(shared_secret) {
   // 注册 4 个 conn-aware handler
   rpc_server_.serviceManager().registerMethod(
       "ImService", "Login",
@@ -56,11 +56,18 @@ ImServer::ImServer(const std::string &ip, int port,
   }
   // 注入共享 Redis 幂等存储：把 request_id 去重从进程内 LRU 换成跨节点共享，
   // 使 LbRpcClient failover 到其它节点时去重仍然生效。
-  auto idem_store = std::make_unique<IdempotencyRedis>();
+  auto idem_store = std::make_unique<IdempotencyRedis>(server_id_);
   if (!idem_store->connect(redis_ip_, redis_port_)) {
     throw std::runtime_error("Failed to connect Redis (idempotency store)");
   }
   rpc_server_.setIdempotencyStore(std::move(idem_store));
+  // 幂等 key 按认证用户隔离：不同用户即使撞 request_id 也不会串扰。
+  // 注意：extractor 在 dispatch() 构造 key 时执行（早于 handler 内
+  // verifyIdentity）， 依赖「IM
+  // 只对网关开放」这一部署边界，见下方信任边界说明。
+  rpc_server_.setNamespace("im");
+  rpc_server_.setCallerIdExtractor(
+      [](const RpcHeader &h) { return h.identity().user_id(); });
   // 连接 MySQL（注册/登录/好友）
   if (!user_dao_.init(db_cfg)) {
     throw std::runtime_error("Failed to connect MySQL");
@@ -140,6 +147,18 @@ ImServer::ImServer(const std::string &ip, int port,
       std::bind(&ImServer::handleLogout, this, std::placeholders::_1,
                 std::placeholders::_2, std::placeholders::_3));
   rpc_server_.serviceManager().registerMethod(
+      "ImService", "ListSessions",
+      std::bind(&ImServer::handleListSessions, this, std::placeholders::_1,
+                std::placeholders::_2, std::placeholders::_3));
+  rpc_server_.serviceManager().registerMethod(
+      "ImService", "KickSession",
+      std::bind(&ImServer::handleKickSession, this, std::placeholders::_1,
+                std::placeholders::_2, std::placeholders::_3));
+  rpc_server_.serviceManager().registerMethod(
+      "ImService", "KickAllSessions",
+      std::bind(&ImServer::handleKickAllSessions, this, std::placeholders::_1,
+                std::placeholders::_2, std::placeholders::_3));
+  rpc_server_.serviceManager().registerMethod(
       "ImService", "ClientDisconnect",
       [this](spConnection conn, const std::string &body) {
         return handleClientDisconnect(conn, body);
@@ -191,44 +210,32 @@ std::string ImServer::handleLogin(spConnection conn,
   std::string user_id = req.username();
   std::string session_id;
 
-  if (auth_enabled_) {
-    // 1. 委托 AuthServer：校验密码 + 签发 access/refresh
-    auth::LoginRequest areq;
-    areq.set_username(req.username());
-    areq.set_password(req.password());
-    areq.set_device_id(req.device_id());
-    areq.set_device_type(static_cast<auth::DeviceType>(req.device_type()));
-    areq.set_client_ip(hdr.client_ip());
+  // 委托 AuthServer：校验密码 + 签发 access/refresh
+  auth::LoginRequest areq;
+  areq.set_username(req.username());
+  areq.set_password(req.password());
+  areq.set_device_id(req.device_id());
+  areq.set_device_type(static_cast<auth::DeviceType>(req.device_type()));
+  areq.set_client_ip(hdr.client_ip());
 
-    std::string resp_body;
-    int32_t err = 0;
-    if (!auth_client_.Call("Login", areq.SerializeAsString(), resp_body, err)) {
-      resp.set_success(false);
-      resp.set_message("auth service unavailable");
-      return resp.SerializeAsString();
-    }
-    auth::LoginResponse aresp;
-    if (!aresp.ParseFromString(resp_body) || !aresp.success()) {
-      resp.set_success(false);
-      resp.set_message(aresp.success() ? "auth response parse error"
-                                       : aresp.message());
-      return resp.SerializeAsString();
-    }
-    resp.set_access_token(aresp.access_token());
-    resp.set_refresh_token(aresp.refresh_token());
-    resp.set_expires_in(aresp.expires_in());
-    session_id = aresp.session().session_id();
-  } else {
-    // 旧路径：本地校验密码（--auth.enabled=false 的灰度回退）
-    if (!user_dao_.verifyLogin(req.username(), req.password())) {
-      resp.set_success(false);
-      resp.set_message("invalid username or password");
-      return resp.SerializeAsString();
-    }
-    resp.set_token(user_id + "_token");
-    session_id =
-        "legacy:" + hdr.gateway_id() + ":" + std::to_string(hdr.conn_id());
+  std::string resp_body;
+  int32_t err = 0;
+  if (!auth_client_.Call("Login", areq.SerializeAsString(), resp_body, err)) {
+    resp.set_success(false);
+    resp.set_message("auth service unavailable");
+    return resp.SerializeAsString();
   }
+  auth::LoginResponse aresp;
+  if (!aresp.ParseFromString(resp_body) || !aresp.success()) {
+    resp.set_success(false);
+    resp.set_message(aresp.success() ? "auth response parse error"
+                                     : aresp.message());
+    return resp.SerializeAsString();
+  }
+  resp.set_access_token(aresp.access_token());
+  resp.set_refresh_token(aresp.refresh_token());
+  resp.set_expires_in(aresp.expires_in());
+  session_id = aresp.session().session_id();
 
   // 2. 本地记录上线（多端会话）：连接引用 = 客户端所在的 Gateway 连接
   ClientConnRef ref;
@@ -263,35 +270,26 @@ std::string ImServer::handleRegister(spConnection conn,
     return resp.SerializeAsString();
   }
 
-  if (auth_enabled_) {
-    // 委托 AuthServer：注册收口到身份 owner，和 Login/Refresh/Logout 对称
-    auth::RegisterRequest areq;
-    areq.set_username(req.username());
-    areq.set_password(req.password());
-    std::string resp_body;
-    int32_t err = 0;
-    if (!auth_client_.Call("Register", areq.SerializeAsString(), resp_body,
-                           err)) {
-      resp.set_success(false);
-      resp.set_message("auth service unavailable");
-      return resp.SerializeAsString();
-    }
-    auth::RegisterResponse aresp;
-    if (!aresp.ParseFromString(resp_body)) {
-      resp.set_success(false);
-      resp.set_message("auth response parse error");
-      return resp.SerializeAsString();
-    }
-    resp.set_success(aresp.success());
-    resp.set_message(aresp.message());
+  // 委托 AuthServer：注册收口到身份 owner，和 Login/Refresh/Logout 对称
+  auth::RegisterRequest areq;
+  areq.set_username(req.username());
+  areq.set_password(req.password());
+  std::string resp_body;
+  int32_t err = 0;
+  if (!auth_client_.Call("Register", areq.SerializeAsString(), resp_body,
+                         err)) {
+    resp.set_success(false);
+    resp.set_message("auth service unavailable");
     return resp.SerializeAsString();
   }
-
-  // 旧路径：--auth.enabled=false 灰度回退，本地直写
-  std::string err;
-  bool ok = user_dao_.registerUser(req.username(), req.password(), &err);
-  resp.set_success(ok);
-  resp.set_message(ok ? "register ok" : err);
+  auth::RegisterResponse aresp;
+  if (!aresp.ParseFromString(resp_body)) {
+    resp.set_success(false);
+    resp.set_message("auth response parse error");
+    return resp.SerializeAsString();
+  }
+  resp.set_success(aresp.success());
+  resp.set_message(aresp.message());
   return resp.SerializeAsString();
 }
 
@@ -669,6 +667,19 @@ void ImServer::onUserChanged(const std::string &payload) {
   // 不阻塞订阅线程：把踢下线逻辑投递到工作池异步执行，立即返回继续收下一条事件
   rpc_server_.submitTask([this, ev = std::move(ev)]() { kickOffline(ev); });
 }
+
+void ImServer::publishUserEvent(im::UserChangedEvent::Type type,
+                                const std::string &user_id,
+                                const std::string &target_id) {
+  im::UserChangedEvent ev;
+  ev.set_type(type);
+  ev.set_user_id(user_id);
+  ev.set_target_id(target_id);
+  std::string payload;
+  ev.SerializeToString(&payload);
+  message_store_.publish("im:user:events", payload);
+}
+
 void ImServer::kickOffline(const im::UserChangedEvent &ev) {
   if (!user_manager_.isOnline(ev.user_id())) {
     return; // 不在本节点，忽略（其他节点会各自处理）
@@ -690,6 +701,12 @@ void ImServer::kickOffline(const im::UserChangedEvent &ev) {
   case im::UserChangedEvent::FRIEND_REMOVED:
     notice.set_message("好友关系已变更");
     break;
+  case im::UserChangedEvent::SESSION_KICKED:
+    notice.set_message("该设备已被踢下线");
+    break;
+  case im::UserChangedEvent::ALL_SESSIONS_KICKED:
+    notice.set_message("账号已从所有设备下线，请重新登录");
+    break;
   default:
     notice.set_message("账号状态已变更，请重新登录");
     break;
@@ -698,12 +715,29 @@ void ImServer::kickOffline(const im::UserChangedEvent &ev) {
   envelope.set_type(im::ServerPushEnvelope::SYSTEM_NOTICE);
   notice.SerializeToString(envelope.mutable_payload());
   std::string frame = packFrame(envelope);
+
+  // 单会话踢：只断 target_id(session_id) 对应的那一条连接
+  if (ev.type() == im::UserChangedEvent::SESSION_KICKED) {
+    ClientConnRef conn;
+    if (!user_manager_.getConnectionBySession(ev.target_id(), &conn)) {
+      return; // 该会话不在本节点，其它节点各自处理
+    }
+    RouteServer s;
+    s.set_server_id(conn.gateway_id);
+    s.set_server_ip(conn.gateway_rpc_ip);
+    s.set_server_port(conn.gateway_rpc_port);
+    s.set_conn_id(conn.conn_id);
+    pushToGateway(s, frame, /*force_close=*/true);
+    return;
+  }
+
   // 多端：每个在线设备都推一条系统通知，然后让 Gateway 关闭该连接
   std::vector<RouteServer> servers = resolveRoutes(ev.user_id());
   for (const auto &s : servers) {
     pushToGateway(s, frame, /*force_close=*/true);
   }
 }
+
 std::string ImServer::packFrame(const google::protobuf::Message &msg) {
   std::string body;
   msg.SerializeToString(&body);
@@ -900,6 +934,148 @@ std::string ImServer::handleLogout(spConnection conn,
     unregisterUserFromRoute(uid, ref);
   }
   resp.set_success(true);
+  return resp.SerializeAsString();
+}
+
+std::string ImServer::handleListSessions(spConnection conn,
+                                         const std::string &request_body,
+                                         const RpcHeader &hdr) {
+  (void)conn;
+  im::ListSessionsRequest req;
+  im::ListSessionsResponse resp;
+  if (!req.ParseFromString(request_body)) {
+    resp.set_success(false);
+    resp.set_message("parse error");
+    return resp.SerializeAsString();
+  }
+  int32_t err = 0;
+  std::string auth_err;
+  if (!verifyIdentity(hdr, &auth_err)) {
+    resp.set_success(false);
+    resp.set_message(std::string("auth failed: ") + auth_err);
+    return resp.SerializeAsString();
+  }
+  // 关键：user_id 从验签后的 Identity 派生，不信任请求体，堵住越权洞
+  const std::string &uid = hdr.identity().user_id();
+
+  auth::ListSessionsRequest areq;
+  areq.set_user_id(uid);
+  std::string resp_body;
+  if (!auth_client_.Call("ListSessions", areq.SerializeAsString(), resp_body,
+                         err)) {
+    resp.set_success(false);
+    resp.set_message("auth service unavailable");
+    return resp.SerializeAsString();
+  }
+  auth::ListSessionsResponse aresp;
+  if (!aresp.ParseFromString(resp_body)) {
+    resp.set_success(false);
+    resp.set_message("auth response parse error");
+    return resp.SerializeAsString();
+  }
+  resp.set_success(aresp.success());
+  resp.set_message(aresp.message());
+  for (const auto &s : aresp.sessions()) {
+    im::SessionInfo *info = resp.add_sessions();
+    info->set_session_id(s.session_id());
+    info->set_user_id(s.user_id());
+    info->set_username(s.username());
+    info->set_device_id(s.device_id());
+    info->set_device_type(static_cast<int32_t>(s.device_type()));
+    info->set_client_ip(s.client_ip());
+    info->set_created_at(s.created_at());
+    info->set_refresh_expires_at(s.refresh_expires_at());
+  }
+  return resp.SerializeAsString();
+}
+
+std::string ImServer::handleKickSession(spConnection conn,
+                                        const std::string &request_body,
+                                        const RpcHeader &hdr) {
+  (void)conn;
+  im::KickSessionRequest req;
+  im::KickSessionResponse resp;
+  if (!req.ParseFromString(request_body)) {
+    resp.set_success(false);
+    resp.set_message("parse error");
+    return resp.SerializeAsString();
+  }
+  int32_t err = 0;
+  std::string auth_err;
+  if (!verifyIdentity(hdr, &auth_err)) {
+    resp.set_success(false);
+    resp.set_message(std::string("auth failed: ") + auth_err);
+    return resp.SerializeAsString();
+  }
+  const std::string &uid = hdr.identity().user_id();
+
+  auth::KickSessionRequest areq;
+  areq.set_user_id(uid);
+  areq.set_session_id(req.session_id());
+  std::string resp_body;
+  if (!auth_client_.Call("KickSession", areq.SerializeAsString(), resp_body,
+                         err)) {
+    resp.set_success(false);
+    resp.set_message("auth service unavailable");
+    return resp.SerializeAsString();
+  }
+  auth::KickSessionResponse aresp;
+  if (!aresp.ParseFromString(resp_body)) {
+    resp.set_success(false);
+    resp.set_message("auth response parse error");
+    return resp.SerializeAsString();
+  }
+  resp.set_success(aresp.success());
+  resp.set_message(aresp.message());
+  // 凭据吊销成功后才广播断连接事件
+  if (aresp.success()) {
+    publishUserEvent(im::UserChangedEvent::SESSION_KICKED, uid,
+                     req.session_id());
+  }
+  return resp.SerializeAsString();
+}
+
+std::string ImServer::handleKickAllSessions(spConnection conn,
+                                            const std::string &request_body,
+                                            const RpcHeader &hdr) {
+  (void)conn;
+  im::KickAllSessionsRequest req;
+  im::KickAllSessionsResponse resp;
+  if (!req.ParseFromString(request_body)) {
+    resp.set_success(false);
+    resp.set_message("parse error");
+    return resp.SerializeAsString();
+  }
+  int32_t err = 0;
+  std::string auth_err;
+  if (!verifyIdentity(hdr, &auth_err)) {
+    resp.set_success(false);
+    resp.set_message(std::string("auth failed: ") + auth_err);
+    return resp.SerializeAsString();
+  }
+  const std::string &uid = hdr.identity().user_id();
+
+  auth::KickAllSessionsRequest areq;
+  areq.set_user_id(uid);
+  std::string resp_body;
+  if (!auth_client_.Call("KickAllSessions", areq.SerializeAsString(), resp_body,
+                         err)) {
+    resp.set_success(false);
+    resp.set_message("auth service unavailable");
+    return resp.SerializeAsString();
+  }
+  auth::KickAllSessionsResponse aresp;
+  if (!aresp.ParseFromString(resp_body)) {
+    resp.set_success(false);
+    resp.set_message("auth response parse error");
+    return resp.SerializeAsString();
+  }
+  resp.set_success(aresp.success());
+  resp.set_kicked(aresp.kicked());
+  resp.set_message(aresp.message());
+  if (aresp.success()) {
+    publishUserEvent(im::UserChangedEvent::ALL_SESSIONS_KICKED, uid);
+  }
   return resp.SerializeAsString();
 }
 

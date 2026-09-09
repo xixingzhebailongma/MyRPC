@@ -8,6 +8,7 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 class EventLoop;
@@ -40,6 +41,10 @@ public:
   // 查询某 ip:port 连接的熔断状态（不存在则返回 false）。
   // key 形如 "1.2.3.4:8080"，与内部连接的键一致。
   bool isCircuitOpen(const std::string &key);
+  // 移除 key 不在 keep 中的连接并主动 close（节点下线时由上层调用）。
+  void removeExcept(const std::unordered_set<std::string> &keep);
+  // 当前池中连接数（测试/观测用）。
+  size_t size();
 
 private:
   std::shared_ptr<AsyncRpcChannel> getOrCreate(const std::string &ip,

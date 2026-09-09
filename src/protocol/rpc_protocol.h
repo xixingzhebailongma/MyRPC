@@ -13,6 +13,10 @@ constexpr uint32_t kMaxMessageLen = 64u << 20; // 64MB，超过视为非法帧
 // 重试）。 与 src/client/rpc_error_code.h 的 RpcError::SERVER_OVERLOADED
 // 同值，保持同步。
 constexpr int32_t kErrServerOverloaded = 10007;
+// 服务端拒绝非法 request_id（幂等键格式校验失败）。与
+// src/client/rpc_error_code.h 的 RpcError::INVALID_REQUEST_ID 同值。
+// 非临时性错误，客户端不应重试。
+constexpr int32_t kErrInvalidRequestId = 10008;
 
 // ===== 编解码（成对、对称）=====
 

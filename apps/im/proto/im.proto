@@ -205,6 +205,46 @@ message PendingMessageRecord{
        string message = 2;
    }
 
+ // ========== 多端会话管理（客户端 → ImService） ==========
+ // 客户端契约：不 import auth.proto，字段与 auth::SessionInfo 对齐；
+ // device_type 用 int32 承载，避免与 auth.proto 的 enum 耦合。
+ message SessionInfo {
+     string session_id         = 1;
+     string user_id            = 2;
+     string username           = 3;
+     string device_id          = 4;
+     int32  device_type        = 5;
+     string client_ip          = 6;
+     int64  created_at         = 7;   // 秒级 unix 时间戳
+     int64  refresh_expires_at = 8;   // 秒级 unix 时间戳
+ }
+
+ message ListSessionsRequest {
+     // 空：user_id 由 im 从验签后的 Identity 派生，防止客户端指定他人
+ }
+ message ListSessionsResponse {
+     bool success = 1;
+     repeated SessionInfo sessions = 2;
+     string message = 3;
+ }
+
+ message KickSessionRequest {
+     string session_id = 1;   // user_id 由 im 从验签后的 Identity 派生
+ }
+ message KickSessionResponse {
+     bool success = 1;
+     string message = 2;
+ }
+
+ message KickAllSessionsRequest {
+     // 空：user_id 由 im 从验签后的 Identity 派生
+ }
+ message KickAllSessionsResponse {
+     bool success = 1;
+     int32 kicked = 2;   // 实际吊销的会话数
+     string message = 3;
+ }
+
  // ========== 用户数据变更事件（Redis Pub/Sub 广播用，跨节点） ==========
  message UserChangedEvent {
      enum Type {

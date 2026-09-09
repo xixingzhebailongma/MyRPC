@@ -4,10 +4,12 @@
 #include "TcpServer.h"
 #include "idempotency_lru.h"
 #include "idempotency_store.h"
+#include "lease_renewer.h"
 #include "rpc_header.pb.h"
 #include "rpc_protocol.h"
 #include "service_manager.h"
 #include "service_registry.h"
+#include <chrono>
 #include <cstdint>
 #include <string>
 RpcServer::RpcServer(const std::string &ip, uint16_t port, int threadnum,
@@ -33,6 +35,10 @@ RpcServer::~RpcServer() = default;
 void RpcServer::start() {
   server_.start();
 
+  // 创建租约续期器（setIdempotencyStore 须在 start() 前完成注入）
+  renewer_ = std::make_unique<LeaseRenewer>(idemStore_.get());
+  renewer_->start();
+
   if (registry_) {
     // 首轮失败不再意味着永久降级：EtcdClient 后台线程会持续重试注册
     if (!registry_->registerService()) {
@@ -46,8 +52,11 @@ void RpcServer::stop() {
   if (registry_) {
     registry_->stop();
   }
-  server_.stop(); // 先 join 全部 IO 线程，之后不再有新的 onMessage
-  workPool_.stop(); // 再排空并 join 工作线程
+  server_.stop(); // 先停止 IO（不再有新的 dispatch/add）
+  workPool_.stop(); // 再排空并 join 工作线程（不再有 complete/remove）
+  if (renewer_) {
+    renewer_->stop(); // 最后停续租线程
+  }
 }
 
 void RpcServer::submitTask(std::function<void()> task) {
@@ -113,10 +122,19 @@ void RpcServer::dispatch(spConnection conn, std::string payload) {
   const bool dedup_enabled = !request_id.empty();
   std::string cache_key;
   IdempotencyStore *idem = idemStore_.get(); // 拷贝裸指针，lambda 不捕获 this
+  LeaseRenewer *renewer = renewer_.get(); // 同上；start() 后非空
+  IdemLease lease;                        // claim 成功时填入 fencing token
   if (dedup_enabled) {
-    cache_key = service_name + "/" + method_name + ":" + request_id;
+    // request_id 格式校验：非法直接拒绝，不 claim、不执行
+    if (!isValidRequestId(request_id)) {
+      LOG_WARN("RpcServer: invalid request_id rejected (len=%zu) seq=%lu",
+               request_id.size(), seq);
+      conn->send(encodeMessage(buildResponse(seq, kErrInvalidRequestId, "")));
+      return;
+    }
+    cache_key = buildCacheKey(service_name, method_name, request_id, header);
     std::string cached_body;
-    IdemResult r = idem->claim(cache_key, &cached_body);
+    IdemResult r = idem->claim(cache_key, &cached_body, &lease);
     if (r == IdemResult::kReplay) {
       LOG_DEBUG("RpcServer: replay idempotent response %s seq=%lu",
                 cache_key.c_str(), seq);
@@ -128,7 +146,14 @@ void RpcServer::dispatch(spConnection conn, std::string payload) {
                cache_key.c_str(), seq);
       return;
     }
-    // kExecute：继续执行；handler 未找到等失败路径会 abort() 释放占位。
+    // kExecute：登记租约续期；软截止到期由 renewer 释放租约
+    if (renewer) {
+      auto deadline = std::chrono::steady_clock::time_point::max();
+      if (execution_deadline_ms_ > 0)
+        deadline = std::chrono::steady_clock::now() +
+                   std::chrono::milliseconds(execution_deadline_ms_);
+      renewer->add(cache_key, lease, deadline);
+    }
   }
 
   // 1) 优先查找带 context(header) 的 handler
@@ -136,14 +161,18 @@ void RpcServer::dispatch(spConnection conn, std::string payload) {
       serviceMgr_.findMethodWithContext(service_name, method_name);
   if (handlerWithContext) {
     if (!workPool_.tryAdd([conn, handlerWithContext, seq, body, hdr,
-                           dedup_enabled, cache_key, idem]() {
+                           dedup_enabled, cache_key, idem, lease, renewer]() {
           std::string resp = handlerWithContext(conn, body, hdr);
-          if (dedup_enabled)
-            idem->complete(cache_key, resp);
+          if (dedup_enabled) {
+            idem->complete(cache_key, lease, resp);
+            if (renewer)
+              renewer->remove(cache_key);
+          }
           std::string wire = encodeMessage(buildResponse(seq, 0, resp));
           conn->send(std::move(wire));
         }))
-      rejectOverloaded(conn, seq, dedup_enabled, cache_key, idem);
+      rejectOverloaded(conn, seq, dedup_enabled, cache_key, idem, lease,
+                       renewer);
     return;
   }
 
@@ -152,29 +181,37 @@ void RpcServer::dispatch(spConnection conn, std::string payload) {
       serviceMgr_.findMethodWithConn(service_name, method_name);
   if (handlerWithConn) {
     if (!workPool_.tryAdd([conn, handlerWithConn, seq, body, dedup_enabled,
-                           cache_key, idem]() {
+                           cache_key, idem, lease, renewer]() {
           std::string resp = handlerWithConn(conn, body);
-          if (dedup_enabled)
-            idem->complete(cache_key, resp);
+          if (dedup_enabled) {
+            idem->complete(cache_key, lease, resp);
+            if (renewer)
+              renewer->remove(cache_key);
+          }
           std::string wire = encodeMessage(buildResponse(seq, 0, resp));
           conn->send(std::move(wire));
         }))
-      rejectOverloaded(conn, seq, dedup_enabled, cache_key, idem);
+      rejectOverloaded(conn, seq, dedup_enabled, cache_key, idem, lease,
+                       renewer);
     return;
   }
 
   // 3) 最后查找普通 handler
   auto handler = serviceMgr_.findMethod(service_name, method_name);
   if (handler) {
-    if (!workPool_.tryAdd(
-            [conn, handler, seq, body, dedup_enabled, cache_key, idem]() {
-              std::string resp = handler(body);
-              if (dedup_enabled)
-                idem->complete(cache_key, resp);
-              std::string wire = encodeMessage(buildResponse(seq, 0, resp));
-              conn->send(std::move(wire));
-            }))
-      rejectOverloaded(conn, seq, dedup_enabled, cache_key, idem);
+    if (!workPool_.tryAdd([conn, handler, seq, body, dedup_enabled, cache_key,
+                           idem, lease, renewer]() {
+          std::string resp = handler(body);
+          if (dedup_enabled) {
+            idem->complete(cache_key, lease, resp);
+            if (renewer)
+              renewer->remove(cache_key);
+          }
+          std::string wire = encodeMessage(buildResponse(seq, 0, resp));
+          conn->send(std::move(wire));
+        }))
+      rejectOverloaded(conn, seq, dedup_enabled, cache_key, idem, lease,
+                       renewer);
     return;
   }
   // 结果型 handler（带 error_code）：成功才缓存；失败 abort
@@ -183,19 +220,23 @@ void RpcServer::dispatch(spConnection conn, std::string payload) {
       serviceMgr_.findMethodWithContextResult(service_name, method_name);
   if (handlerWithContextResult) {
     if (!workPool_.tryAdd([conn, handlerWithContextResult, seq, body, hdr,
-                           dedup_enabled, cache_key, idem]() {
+                           dedup_enabled, cache_key, idem, lease, renewer]() {
           RpcMethodResult result = handlerWithContextResult(conn, body, hdr);
           if (dedup_enabled) {
             if (result.error_code == 0)
-              idem->complete(cache_key, result.body);
+              idem->complete(cache_key, lease, result.body);
             else
-              idem->abort(cache_key); // 失败不缓存，客户端重试会真正重执行
+              idem->abort(cache_key,
+                          lease); // 失败不缓存，客户端重试会真正重执行
+            if (renewer)
+              renewer->remove(cache_key);
           }
           std::string wire =
               encodeMessage(buildResponse(seq, result.error_code, result.body));
           conn->send(std::move(wire));
         }))
-      rejectOverloaded(conn, seq, dedup_enabled, cache_key, idem);
+      rejectOverloaded(conn, seq, dedup_enabled, cache_key, idem, lease,
+                       renewer);
     return;
   }
 
@@ -203,45 +244,54 @@ void RpcServer::dispatch(spConnection conn, std::string payload) {
       serviceMgr_.findMethodWithConnResult(service_name, method_name);
   if (handlerWithConnResult) {
     if (!workPool_.tryAdd([conn, handlerWithConnResult, seq, body,
-                           dedup_enabled, cache_key, idem]() {
+                           dedup_enabled, cache_key, idem, lease, renewer]() {
           RpcMethodResult result = handlerWithConnResult(conn, body);
           if (dedup_enabled) {
             if (result.error_code == 0)
-              idem->complete(cache_key, result.body);
+              idem->complete(cache_key, lease, result.body);
             else
-              idem->abort(cache_key);
+              idem->abort(cache_key, lease);
+            if (renewer)
+              renewer->remove(cache_key);
           }
           std::string wire =
               encodeMessage(buildResponse(seq, result.error_code, result.body));
           conn->send(std::move(wire));
         }))
-      rejectOverloaded(conn, seq, dedup_enabled, cache_key, idem);
+      rejectOverloaded(conn, seq, dedup_enabled, cache_key, idem, lease,
+                       renewer);
     return;
   }
 
   auto handlerResult = serviceMgr_.findMethodResult(service_name, method_name);
   if (handlerResult) {
     if (!workPool_.tryAdd([conn, handlerResult, seq, body, dedup_enabled,
-                           cache_key, idem]() {
+                           cache_key, idem, lease, renewer]() {
           RpcMethodResult result = handlerResult(body);
           if (dedup_enabled) {
             if (result.error_code == 0)
-              idem->complete(cache_key, result.body);
+              idem->complete(cache_key, lease, result.body);
             else
-              idem->abort(cache_key);
+              idem->abort(cache_key, lease);
+            if (renewer)
+              renewer->remove(cache_key);
           }
           std::string wire =
               encodeMessage(buildResponse(seq, result.error_code, result.body));
           conn->send(std::move(wire));
         }))
-      rejectOverloaded(conn, seq, dedup_enabled, cache_key, idem);
+      rejectOverloaded(conn, seq, dedup_enabled, cache_key, idem, lease,
+                       renewer);
     return;
   }
   // 4) 找不到方法：释放已 claim 的占位，避免该 key 永久 in-flight。
   LOG_WARN("RpcServer: method not found: %s.%s", service_name.c_str(),
            method_name.c_str());
-  if (dedup_enabled)
-    idem->abort(cache_key);
+  if (dedup_enabled) {
+    idem->abort(cache_key, lease);
+    if (renewer)
+      renewer->remove(cache_key);
+  }
   std::string wire = encodeMessage(buildResponse(seq, -1, ""));
   conn->send(std::move(wire));
 }
@@ -249,11 +299,45 @@ void RpcServer::dispatch(spConnection conn, std::string payload) {
 void RpcServer::rejectOverloaded(spConnection conn, uint64_t seq,
                                  bool dedup_enabled,
                                  const std::string &cache_key,
-                                 IdempotencyStore *idem) {
-  if (dedup_enabled)
-    idem->abort(cache_key); // 释放已 claim 的 in-flight 占位，让客户端可重试
+                                 IdempotencyStore *idem, const IdemLease &lease,
+                                 LeaseRenewer *renewer) {
+  if (dedup_enabled) {
+    idem->abort(cache_key,
+                lease); // 释放已 claim 的 in-flight 占位，让客户端可重试
+    if (renewer)
+      renewer->remove(cache_key);
+  }
   LOG_WARN("RpcServer: work pool full, rejecting seq=%lu (overloaded)", seq);
   conn->send(encodeMessage(buildResponse(seq, kErrServerOverloaded, "")));
+}
+
+std::string RpcServer::buildCacheKey(const std::string &service_name,
+                                     const std::string &method_name,
+                                     const std::string &request_id,
+                                     const RpcHeader &header) {
+  // key = idem:{namespace}:{caller_id}:{service}/{method}:{request_id}
+  // caller_id 为空时省略该段（不隔离，保持全局唯一押注在 request_id 上）
+  std::string key = "idem:" + namespace_;
+  std::string caller =
+      caller_id_extractor_ ? caller_id_extractor_(header) : std::string();
+  if (!caller.empty())
+    key += ":" + caller;
+  key += ":" + service_name + "/" + method_name + ":" + request_id;
+  return key;
+}
+
+bool RpcServer::isValidRequestId(const std::string &request_id) {
+  // 长度 ≤128，字符集 [0-9a-zA-Z-_.]（与客户端 generateUuid 输出兼容）。
+  // 拒绝极短/超长/含特殊字符的 ID，降低碰撞与注入风险。
+  if (request_id.empty() || request_id.size() > 128)
+    return false;
+  for (char c : request_id) {
+    bool ok = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') ||
+              (c >= 'A' && c <= 'Z') || c == '-' || c == '_' || c == '.';
+    if (!ok)
+      return false;
+  }
+  return true;
 }
 
 void RpcServer::onConnection(spConnection conn) {

@@ -66,7 +66,11 @@ target_link_libraries(test_idempotency_lru
     PRIVATE rpc_server
     PRIVATE Threads::Threads
 )
-
+add_executable(test_idempotency_redis test_idempotency_redis.cc)
+target_link_libraries(test_idempotency_redis
+    PRIVATE idempotency_redis
+    PRIVATE Threads::Threads
+)
 add_executable(test_async_rpc_client test_async_rpc_client.cc)
 target_link_libraries(test_async_rpc_client
     PRIVATE rpc_async_client
