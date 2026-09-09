@@ -842,6 +842,65 @@ bool RedisClient::eval(const std::string &script,
   }
   return true;
 }
+std::vector<std::string>
+RedisClient::evalRead(const std::string &script,
+                      const std::vector<std::string> &keys,
+                      const std::vector<std::string> &args) {
+  auto conn = pool_.acquire();
+  if (!conn) {
+    LOG_ERROR("RedisClient::evalRead: no available connection");
+    return {};
+  }
+  // EVAL script numkeys key1 ... keyN arg1 ... argM
+  int argc = 2 + static_cast<int>(keys.size()) + static_cast<int>(args.size());
+  std::vector<const char *> argv;
+  std::vector<size_t> argvlen;
+  argv.reserve(argc);
+  argvlen.reserve(argc);
+  argv.push_back("EVAL");
+  argvlen.push_back(4);
+  argv.push_back(script.data());
+  argvlen.push_back(script.size());
+  std::string numkeys_str = std::to_string(keys.size());
+  argv.push_back(numkeys_str.c_str());
+  argvlen.push_back(numkeys_str.size());
+  for (const auto &k : keys) {
+    argv.push_back(k.data());
+    argvlen.push_back(k.size());
+  }
+  for (const auto &a : args) {
+    argv.push_back(a.data());
+    argvlen.push_back(a.size());
+  }
+  RedisReply reply(static_cast<redisReply *>(
+      redisCommandArgv(conn.get(), argc, argv.data(), argvlen.data())));
+  if (!reply || conn.get()->err != 0) {
+    conn.markBroken();
+    LOG_ERROR("RedisClient::evalRead: connection lost");
+    return {};
+  }
+  if (reply->type == REDIS_REPLY_ERROR) {
+    LOG_ERROR("RedisClient::evalRead: server error: %s",
+              std::string(reply->str, reply->len).c_str());
+    return {};
+  }
+  std::vector<std::string> result;
+  auto push = [&result](const redisReply *e) {
+    if (!e)
+      return;
+    if (e->type == REDIS_REPLY_STRING)
+      result.emplace_back(e->str, e->len);
+    else if (e->type == REDIS_REPLY_INTEGER)
+      result.emplace_back(std::to_string(e->integer));
+  };
+  if (reply->type == REDIS_REPLY_ARRAY) {
+    for (size_t i = 0; i < reply->elements; ++i)
+      push(reply->element[i]);
+  } else {
+    push(reply.get());
+  }
+  return result;
+}
 // ---------- Stream 操作（消息队列） ----------
 // 解析单个 Stream 条目回复 [id, [field, value, ...]] → StreamEntry
 static bool parseStreamEntry(const redisReply *entry_reply, StreamEntry *out) {

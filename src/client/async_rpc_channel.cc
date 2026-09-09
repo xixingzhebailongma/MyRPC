@@ -22,7 +22,9 @@ AsyncRpcChannel::AsyncRpcChannel(EventLoop *loop, const std::string &ip,
     : loop_(loop), server_ip_(ip), server_port_(port), cfg_(cfg),
       failure_threshold_(cfg.circuit_failure_threshold),
       backoff_base_ms_(cfg.circuit_backoff_base_ms),
-      backoff_max_ms_(cfg.circuit_backoff_max_ms) {
+      backoff_max_ms_(cfg.circuit_backoff_max_ms),
+      idle_ttl_ms_(cfg.channel_idle_ttl_ms) {
+  last_used_ms_.store(nowMs());
   client_.reset(new TcpClient(loop, InetAddress(ip, port), "AsyncRpcChannel"));
 }
 
@@ -42,6 +44,7 @@ void AsyncRpcChannel::close() {
   auto self = shared_from_this();
   loop_->queueinloop([self] {
     self->loop_->cancel(self->heartbeat_timer_);
+    self->loop_->cancel(self->idle_timer_);
     self->client_->stop();
     self->conn_.reset();
     self->connected_.store(false);
@@ -73,6 +76,7 @@ void AsyncRpcChannel::callImpl(
     const std::string &service, const std::string &method,
     const std::string &body, int timeout_ms, const std::string &request_id,
     std::shared_ptr<std::promise<std::string>> promise, ResponseCallback cb) {
+  last_used_ms_.store(nowMs());
   auto self = shared_from_this();
   loop_->queueinloop([self, service, method, body, timeout_ms, request_id,
                       promise, cb] {
@@ -84,6 +88,7 @@ void AsyncRpcChannel::callImpl(
       return;
     }
 
+    //第三步：确保连接初始化（懒启动）
     self->startInLoop();
 
     // 熔断期快速失败：不 connect、不记失败、也不计调用数
@@ -297,4 +302,41 @@ void AsyncRpcChannel::sendHeartbeatPing() {
   uint64_t seq = next_seq_id_++;
   std::string wire = encodeMessage(buildHeartbeat(seq));
   conn_->send(std::move(wire));
+}
+
+void AsyncRpcChannel::setIdleTimeout(uint64_t ttl_ms) {
+  idle_ttl_ms_ = ttl_ms;
+  std::weak_ptr<AsyncRpcChannel> weak = weak_from_this();
+  loop_->queueinloop([weak] {
+    auto self = weak.lock();
+    if (self && !self->closed_.load())
+      self->armIdleTimerInLoop();
+  });
+}
+
+void AsyncRpcChannel::setIdleExpiredCallback(
+    std::function<void(std::shared_ptr<AsyncRpcChannel>)> cb) {
+  idle_expired_cb_ = std::move(cb);
+}
+
+void AsyncRpcChannel::armIdleTimerInLoop() {
+  if (idle_ttl_ms_ == 0)
+    return;
+  std::weak_ptr<AsyncRpcChannel> weak = weak_from_this();
+  double seconds = idle_ttl_ms_ / 1000.0;
+  idle_timer_ = loop_->runAfter(seconds, [weak] {
+    auto self = weak.lock();
+    if (!self || self->closed_.load())
+      return;
+    if (self->idleExpired()) {
+      if (self->idle_expired_cb_)
+        self->idle_expired_cb_(self);
+    } else {
+      self->armIdleTimerInLoop(); // 仍活跃，重装
+    }
+  });
+}
+
+bool AsyncRpcChannel::idleExpired() const {
+  return nowMs() - last_used_ms_.load() >= idle_ttl_ms_;
 }

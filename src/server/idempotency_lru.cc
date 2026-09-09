@@ -22,7 +22,7 @@ void IdempotencyLru::evictIfNeeded() {
 }
 
 IdemResult IdempotencyLru::claim(const std::string &key,
-                                 std::string *cached_body) {
+                                 std::string *cached_body, IdemLease *lease) {
   std::lock_guard<std::mutex> lock(mutex_);
   auto now = std::chrono::steady_clock::now();
   auto it = map_.find(key);
@@ -36,48 +36,66 @@ IdemResult IdempotencyLru::claim(const std::string &key,
           *cached_body = e.body;
         return IdemResult::kReplay;
       }
-      // 已过期：惰性回收，落回插入
-      erase(it->second);
-    } else { // kInFlight
+      erase(it->second); // 已过期：惰性回收，落回插入
+    } else {             // kInFlight
       if (now < e.deadline) {
         return IdemResult::kInFlight;
       }
-      // 悬挂租约已过期：回收占位，允许重新 claim
-      erase(it->second);
+      erase(it->second); // 悬挂租约已过期：回收占位，允许重新 claim
     }
   }
 
-  // 插入 in-flight 占位
+  // 插入 in-flight 占位，并发放 fencing token
   Entry entry;
   entry.state = State::kInFlight;
+  entry.token = ++next_token_;
   entry.deadline = now + std::chrono::milliseconds(in_flight_ttl_ms_);
   lru_.push_front({key, std::move(entry)});
   map_[key] = lru_.begin();
   evictIfNeeded();
+  if (lease)
+    lease->token = next_token_;
   return IdemResult::kExecute;
 }
 
-void IdempotencyLru::complete(const std::string &key, const std::string &body) {
+bool IdempotencyLru::renew(const std::string &key, const IdemLease &lease) {
   std::lock_guard<std::mutex> lock(mutex_);
   auto it = map_.find(key);
   if (it == map_.end())
-    return; // 已被淘汰/过期，no-op
+    return false; // 已被淘汰/过期
   Entry &e = it->second->second;
-  if (e.state != State::kInFlight)
-    return;
+  if (e.state != State::kInFlight || e.token != lease.token)
+    return false; // 已被新请求接管
+  // 刷新 in-flight 租约
+  e.deadline = std::chrono::steady_clock::now() +
+               std::chrono::milliseconds(in_flight_ttl_ms_);
+  return true;
+}
+
+bool IdempotencyLru::complete(const std::string &key, const IdemLease &lease,
+                              const std::string &body) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  auto it = map_.find(key);
+  if (it == map_.end())
+    return false; // 已被淘汰/过期
+  Entry &e = it->second->second;
+  if (e.state != State::kInFlight || e.token != lease.token)
+    return false; // 已被新请求接管：丢弃本次结果
   e.state = State::kDone;
   e.body = body;
   e.deadline =
       std::chrono::steady_clock::now() + std::chrono::milliseconds(ttl_ms_);
   touch(it->second);
+  return true;
 }
 
-void IdempotencyLru::abort(const std::string &key) {
+void IdempotencyLru::abort(const std::string &key, const IdemLease &lease) {
   std::lock_guard<std::mutex> lock(mutex_);
   auto it = map_.find(key);
   if (it == map_.end())
     return;
-  if (it->second->second.state == State::kInFlight) {
+  Entry &e = it->second->second;
+  if (e.state == State::kInFlight && e.token == lease.token) {
     erase(it->second);
   }
 }

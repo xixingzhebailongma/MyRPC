@@ -134,6 +134,11 @@ public:
   // 数组。
   bool eval(const std::string &script, const std::vector<std::string> &keys,
             const std::vector<std::string> &args);
+  // 执行 Lua 脚本并返回其返回值（EVAL）。Lua 返回多值 →
+  // 数组元素（数字转字符串）。 连接失败/脚本报错返回空 vector。
+  std::vector<std::string> evalRead(const std::string &script,
+                                    const std::vector<std::string> &keys,
+                                    const std::vector<std::string> &args);
   // ---------- Stream 操作（消息队列） ----------
   // XADD stream * field value → 返回新条目 id；失败返回空串
   std::string xadd(const std::string &stream, const std::string &field,

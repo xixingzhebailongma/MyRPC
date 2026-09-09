@@ -60,6 +60,11 @@ public:
   // 熔断状态（供 AsyncLbRpcClient 跳过熔断节点）
   bool isCircuitOpen() const;
   int consecutiveFailures() const { return consecutive_failures_.load(); }
+  // 空闲回收：ttl_ms 内无调用则关闭并从连接池剔除；0 = 禁用。
+  void setIdleTimeout(uint64_t ttl_ms);
+  // 空闲到期回调（由 AsyncRpcClient 绑定：从池中 erase + close）。
+  void setIdleExpiredCallback(
+      std::function<void(std::shared_ptr<AsyncRpcChannel>)> cb);
 
 private:
   enum class State { kIdle, kConnected, kBroken };
@@ -90,6 +95,9 @@ private:
   // 心跳
   void heartbeatTick();
   void sendHeartbeatPing();
+  // 空闲回收（只在 loop 线程访问）
+  void armIdleTimerInLoop();
+  bool idleExpired() const;
 
   EventLoop *loop_;
   std::unique_ptr<TcpClient> client_;
@@ -111,6 +119,10 @@ private:
   TimerId heartbeat_timer_;
   uint64_t last_active_ms_{0};
   int heartbeat_miss_{0};
+  // 空闲回收
+  TimerId idle_timer_;   // 只在 loop 线程访问
+  uint64_t idle_ttl_ms_; // 构造时从 cfg 拷贝，之后只读
+  std::function<void(std::shared_ptr<AsyncRpcChannel>)> idle_expired_cb_;
 
   std::atomic<State> state_{State::kIdle};
   std::atomic<int> consecutive_failures_{0};
@@ -123,4 +135,5 @@ private:
   std::atomic<uint64_t> total_calls_{0};
   std::atomic<uint64_t> success_calls_{0};
   std::atomic<uint64_t> fail_calls_{0};
+  std::atomic<uint64_t> last_used_ms_{0}; // 最近一次 Call 时间（单调 ms）
 };

@@ -15,6 +15,7 @@ enum class RpcError : int32_t {
   NO_AVAILABLE_NODE = 10006,  // 无可用节点 / 全部熔断
   SERVER_OVERLOADED =
       10007, // 服务端工作队列满、拒绝请求（临时性错误，客户端应 failover 重试）
+  INVALID_REQUEST_ID = 10008, // 服务端拒绝非法 request_id（幂等键格式校验失败）
   UNKNOWN = 10999,
 };
 
@@ -37,6 +38,8 @@ inline const char *rpcErrorName(RpcError e) {
     return "NO_AVAILABLE_NODE";
   case RpcError::SERVER_OVERLOADED:
     return "SERVER_OVERLOADED";
+  case RpcError::INVALID_REQUEST_ID:
+    return "INVALID_REQUEST_ID";
   case RpcError::UNKNOWN:
     return "UNKNOWN";
   }

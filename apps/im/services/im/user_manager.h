@@ -53,6 +53,10 @@ public:
   // 按连接 (gateway_id, conn_id) 反向推导 user_id
   std::string getUserIdByConn(const std::string &gateway_id, uint64_t conn_id);
 
+  // 按 session_id 反查连接（单会话踢用）。命中返回 true 并填 out，否则 false。
+  bool getConnectionBySession(const std::string &session_id,
+                              ClientConnRef *out);
+
   // 统计接口（周期任务/监控用）：返回在线用户数与活跃会话数。
   // 只读，用 shared_lock，可安全地在任意线程调用。
   size_t onlineUserCount();

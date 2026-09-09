@@ -75,6 +75,17 @@ UserManager::getConnections(const std::string &user_id) {
   return result;
 }
 
+bool UserManager::getConnectionBySession(const std::string &session_id,
+                                         ClientConnRef *out) {
+  std::shared_lock<std::shared_mutex> lock(mutex_);
+  auto it = sessions_.find(session_id);
+  if (it == sessions_.end())
+    return false;
+  if (out)
+    *out = it->second.conn;
+  return true;
+}
+
 std::string UserManager::getUserIdByConn(const std::string &gateway_id,
                                          uint64_t conn_id) {
   std::unique_lock<std::shared_mutex> lock(mutex_);

@@ -42,6 +42,8 @@ void AsyncLbRpcClient::applyNodes(std::vector<ServiceNode> newNodes) {
   for (const auto &n : nodes_)
     ids.push_back(n.address());
   balancer_->rebuild(ids);
+  std::unordered_set<std::string> alive(ids.begin(), ids.end());
+  client_.removeExcept(alive);
 }
 
 std::future<std::string> AsyncLbRpcClient::Call(const std::string &methodName,

@@ -37,7 +37,7 @@ public:
            const std::string &etcd_endpoints, const std::string &redis_ip,
            int redis_port, const DbConfig &db_cfg,
            const std::string &auth_service = "AuthService",
-           bool auth_enabled = true, const std::string &shared_secret = "");
+           const std::string &shared_secret = "");
   void start();
   void stop();
 
@@ -80,6 +80,12 @@ private:
   // 工具：把一个 protobuf 消息打包成 [4字节LE长度][序列化数据] 的帧
   std::string packFrame(const google::protobuf::Message &msg);
 
+  // 发布用户数据变更事件（跨节点踢下线）：target_id 承载
+  // session_id（单会话踢时）
+  void publishUserEvent(im::UserChangedEvent::Type type,
+                        const std::string &user_id,
+                        const std::string &target_id = "");
+
   // 周期任务：统计并打印在线用户数（样板：定时器回调只发令，重活丢工作池）
   void reportOnlineStats();
 
@@ -98,6 +104,15 @@ private:
   std::string handleRefresh(spConnection conn, const std::string &request_body);
   std::string handleLogout(spConnection conn, const std::string &request_body,
                            const RpcHeader &hdr);
+  std::string handleListSessions(spConnection conn,
+                                 const std::string &request_body,
+                                 const RpcHeader &hdr);
+  std::string handleKickSession(spConnection conn,
+                                const std::string &request_body,
+                                const RpcHeader &hdr);
+  std::string handleKickAllSessions(spConnection conn,
+                                    const std::string &request_body,
+                                    const RpcHeader &hdr);
   // Gateway -> IM：通知某连接已断开（gateway_id/conn_id 在 body 里）
   std::string handleClientDisconnect(spConnection conn,
                                      const std::string &request_body);
@@ -127,6 +142,5 @@ private:
   std::string redis_ip_;
   int redis_port_;
   std::string auth_service_;
-  bool auth_enabled_;
   std::string shared_secret_; // Gateway↔IM 共享密钥
 };

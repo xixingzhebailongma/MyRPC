@@ -27,7 +27,6 @@ int main(int argc, char *argv[]) {
   std::string etcd_endpoints = "http://127.0.0.1:2379";
   std::string route_service = "RouteService";
   std::string auth_service = "AuthService";
-  bool auth_enabled = true;
   std::string shared_secret = ""; // Gateway↔IM 共享密钥
   //初始化 Redis(消息持久化)
   std::string redis_ip = "127.0.0.1";
@@ -71,9 +70,6 @@ int main(int argc, char *argv[]) {
       mysql_pool_size = std::stoi(arg.substr(18));
     } else if (arg.rfind("--auth.service=", 0) == 0) {
       auth_service = arg.substr(15);
-    } else if (arg.rfind("--auth.enabled=", 0) == 0) {
-      std::string v = arg.substr(15);
-      auth_enabled = (v == "true" || v == "1");
     } else if (arg.rfind("--shared.secret=", 0) == 0) {
       shared_secret = arg.substr(16);
     }
@@ -87,8 +83,7 @@ int main(int argc, char *argv[]) {
   db_cfg.pool_size = mysql_pool_size;
   // 4.创建ImServer
   ImServer server(ip, port, server_id, worker_id, route_service, etcd_endpoints,
-                  redis_ip, redis_port, db_cfg, auth_service, auth_enabled,
-                  shared_secret);
+                  redis_ip, redis_port, db_cfg, auth_service, shared_secret);
 
   LOG_INFO("Redis connected at %s:%d", redis_ip.c_str(), redis_port);
   //启动
