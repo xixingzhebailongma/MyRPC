@@ -1,0 +1,57 @@
+# MyRPC IM 基础设施（测试环境）
+# 用途：只跑外部依赖（etcd / Redis / MySQL），C++ 服务进程在宿主机上运行。
+# 启动：  docker compose -f apps/im/deploy/docker-compose.yml up -d
+# 停止：  docker compose -f apps/im/deploy/docker-compose.yml down
+# 清空：  docker compose -f apps/im/deploy/docker-compose.yml down -v
+
+services:
+  etcd:
+    image: gcr.io/etcd-development/etcd:v3.6.0
+    container_name: myrpc-etcd
+    command:
+      - /usr/local/bin/etcd
+      - --name=etcd-node-1
+      - --data-dir=/etcd-data
+      - --listen-client-urls=http://0.0.0.0:2379
+      - --advertise-client-urls=http://127.0.0.1:2379
+      - --listen-peer-urls=http://0.0.0.0:2380
+      - --initial-advertise-peer-urls=http://myrpc-etcd:2380
+      - --initial-cluster=etcd-node-1=http://myrpc-etcd:2380
+      - --initial-cluster-state=new
+      - --initial-cluster-token=etcd-cluster-1
+    ports:
+      - "2379:2379"
+      - "2380:2380"
+    healthcheck:
+      test: ["CMD", "etcdctl", "endpoint", "health"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    container_name: myrpc-redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  mysql:
+    image: mysql:8.0
+    container_name: myrpc-mysql
+    environment:
+      MYSQL_ALLOW_EMPTY_PASSWORD: "yes"   # root 空密码，与 *_server_main.cc 默认值一致
+      MYSQL_DATABASE: myrpc_im
+    ports:
+      - "3306:3306"
+    volumes:
+      # 首次启动（空数据卷）时自动建库建表
+      - ../common/db/schema.sql:/docker-entrypoint-initdb.d/schema.sql:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 5s
+      timeout: 3s
+      retries: 30

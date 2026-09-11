@@ -85,9 +85,6 @@ public:
   std::optional<ZScoreItem> zrangeFirstWithScore(const std::string &key);
   // 按 score 区间批量删除成员，返回删除个数；出错返回 -1
   int64_t zremrangebyscore(const std::string &key, double min, double max);
-  // Pub/Sub发布（一次性，复用连接池）
-  bool publish(const std::string &channel, const std::string &msg);
-
   // —— 批量 Pipeline：多条写命令攒在同一条连接上一次性提交 ——
   // 用 redisAppendCommand 排队、flush() 时 redisGetReply 逐个收回复，
   // 把 N 次 RTT 合并成 1 次。只覆盖写命令（业务里需要读结果的分支仍走单条）。
@@ -143,8 +140,15 @@ public:
   // XADD stream * field value → 返回新条目 id；失败返回空串
   std::string xadd(const std::string &stream, const std::string &field,
                    const std::string &value);
+  // XADD stream MAXLEN ~ maxlen * field value → 追加并近似裁剪到 maxlen；
+  // 用于事件广播流，防止无限增长。失败返回空串。
+  std::string xaddTrimmed(const std::string &stream, const std::string &field,
+                          const std::string &value, int64_t maxlen);
   // XGROUP CREATE stream group 0 MKSTREAM；组已存在(BUSYGROUP)视为成功
   bool xgroupCreate(const std::string &stream, const std::string &group);
+  // XGROUP CREATE stream group $ MKSTREAM：从 $ 起建组（新节点只读未来事件，
+  // 不重放历史）；组已存在(BUSYGROUP)视为成功。
+  bool xgroupCreateFromNow(const std::string &stream, const std::string &group);
   // XREADGROUP GROUP group consumer COUNT count STREAMS stream >
   // BLOCK block_ms>0 时阻塞等待；无消息/超时返回空
   std::vector<StreamEntry> xreadgroup(const std::string &group,

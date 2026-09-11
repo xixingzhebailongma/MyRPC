@@ -9,7 +9,7 @@
 const char *IdempotencyRedis::kClaimScript = R"lua(
   local v = redis.call('GET', KEYS[1])
   if not v then
-    redis.call('SET', KEYS[1], '\x01' .. ARGV[1] .. '\0' .. ARGV[2], 'PX', ARGV[3])
+    redis.call('SET', KEYS[1], '\001' .. ARGV[1] .. '\0' .. ARGV[2], 'PX', ARGV[3])
     return {1, ''}
   end
   if string.byte(v, 1) == 0x02 then
@@ -42,7 +42,7 @@ const char *IdempotencyRedis::kCompleteScript = R"lua(
   local sep = string.find(rest, '\0', 1, true)
   if not sep then return 0 end
   if string.sub(rest, 1, sep - 1) == ARGV[1] and string.sub(rest, sep + 1) == ARGV[2] then
-    redis.call('SET', KEYS[1], '\x02' .. ARGV[4], 'PX', ARGV[3])
+    redis.call('SET', KEYS[1], '\002' .. ARGV[4], 'PX', ARGV[3])
     return 1
   end
   return 0

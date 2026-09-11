@@ -2,6 +2,7 @@
 #include "Logger.h"
 #include "auth.pb.h"
 #include "im.pb.h"
+#include "mq_constants.h"
 #include "user_dao.h"
 #include <functional>
 #include <stdexcept>
@@ -11,7 +12,7 @@ AuthServer::AuthServer(const std::string &ip, uint16_t port,
                        const std::string &etcd_endpoints,
                        const std::string &service_name, const DbConfig &db_cfg,
                        int thread_num)
-    : rpc_server_(ip, port, thread_num) {
+    : rpc_server_(ip, port, thread_num), ip_(ip), port_(port) {
   // 1.连接Redis(会话存储)
   if (!session_store_.connect(redis_ip, redis_port)) {
     throw std::runtime_error("Failed to connect Redis");
@@ -54,9 +55,10 @@ AuthServer::AuthServer(const std::string &ip, uint16_t port,
                 std::placeholders::_1));
   // 4. 注册到 etcd
   rpc_server_.enableRegistry(etcd_endpoints, service_name, ip, port, 30);
-  // 5. 订阅用户数据变更事件：改密码/封禁/删号 → 吊销该用户全部会话
+  // 5. 订阅用户数据变更事件：改密码/封禁/删号 → 吊销该用户全部会话（Stream 广播）
   user_subscriber_.start(
-      redis_ip, redis_port, "im:user:events",
+      redis_ip, redis_port, immq::kUserEventsStream,
+      "im:user:events:auth:" + ip_ + ":" + std::to_string(port_),
       [this](const std::string &payload) { this->onUserChanged(payload); });
 }
 

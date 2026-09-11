@@ -458,28 +458,6 @@ bool RedisClient::zrem(const std::string &key, const std::string &member) {
   return ok;
 }
 
-// ---------- Pub/Sub 发布 ----------
-bool RedisClient::publish(const std::string &channel, const std::string &msg) {
-  auto conn = pool_.acquire();
-  if (!conn) {
-    LOG_ERROR("RedisClient::publish: no available connection");
-    return false;
-  }
-  RedisReply reply(static_cast<redisReply *>(
-      redisCommand(conn.get(), "PUBLISH %b %b", channel.data(), channel.size(),
-                   msg.data(), msg.size())));
-  if (!reply || conn.get()->err != 0) {
-    conn.markBroken();
-    LOG_ERROR("RedisClient::publish: connection lost");
-    return false;
-  }
-  bool ok = (reply->type == REDIS_REPLY_INTEGER);
-  if (!ok) {
-    LOG_ERROR("RedisClient::publish: unexpected reply type %d", reply->type);
-  }
-  return ok;
-}
-
 // ---------- Token 体系新增：setex / hgetall / zremrangebyscore ----------
 bool RedisClient::setex(const std::string &key, const std::string &value,
                         int seconds) {
@@ -807,7 +785,7 @@ bool RedisClient::eval(const std::string &script,
     return false;
   }
   // EVAL script numkeys key1 ... keyN arg1 ... argM
-  int argc = 2 + static_cast<int>(keys.size()) + static_cast<int>(args.size());
+  int argc = 3 + static_cast<int>(keys.size()) + static_cast<int>(args.size());
   std::vector<const char *> argv;
   std::vector<size_t> argvlen;
   argv.reserve(argc);
@@ -852,7 +830,7 @@ RedisClient::evalRead(const std::string &script,
     return {};
   }
   // EVAL script numkeys key1 ... keyN arg1 ... argM
-  int argc = 2 + static_cast<int>(keys.size()) + static_cast<int>(args.size());
+  int argc = 3 + static_cast<int>(keys.size()) + static_cast<int>(args.size());
   std::vector<const char *> argv;
   std::vector<size_t> argvlen;
   argv.reserve(argc);
@@ -951,6 +929,33 @@ std::string RedisClient::xadd(const std::string &stream,
   return id;
 }
 
+std::string RedisClient::xaddTrimmed(const std::string &stream,
+                                     const std::string &field,
+                                     const std::string &value, int64_t maxlen) {
+  auto conn = pool_.acquire();
+  if (!conn) {
+    LOG_ERROR("RedisClient::xaddTrimmed: no available connection");
+    return "";
+  }
+  std::string maxlen_str = std::to_string(maxlen); // 避免 %lld 与 int64_t 类型不匹配
+  RedisReply reply(static_cast<redisReply *>(redisCommand(
+      conn.get(), "XADD %b MAXLEN ~ %s * %b %b", stream.data(), stream.size(),
+      maxlen_str.c_str(), field.data(), field.size(), value.data(),
+      value.size())));
+  if (!reply || conn.get()->err != 0) {
+    conn.markBroken();
+    LOG_ERROR("RedisClient::xaddTrimmed: connection lost");
+    return "";
+  }
+  std::string id;
+  if (reply->type == REDIS_REPLY_STRING) {
+    id.assign(reply->str, reply->len);
+  } else {
+    LOG_ERROR("RedisClient::xaddTrimmed: unexpected reply type %d", reply->type);
+  }
+  return id;
+}
+
 bool RedisClient::xgroupCreate(const std::string &stream,
                                const std::string &group) {
   auto conn = pool_.acquire();
@@ -978,6 +983,38 @@ bool RedisClient::xgroupCreate(const std::string &stream,
     return false;
   }
   LOG_ERROR("RedisClient::xgroupCreate: unexpected reply type %d", reply->type);
+  return false;
+}
+
+bool RedisClient::xgroupCreateFromNow(const std::string &stream,
+                                      const std::string &group) {
+  auto conn = pool_.acquire();
+  if (!conn) {
+    LOG_ERROR("RedisClient::xgroupCreateFromNow: no available connection");
+    return false;
+  }
+  // 从 $ 起建组：新节点只读未来事件，不重放历史（与投递用的 xgroupCreate 从 0 起不同）
+  RedisReply reply(static_cast<redisReply *>(
+      redisCommand(conn.get(), "XGROUP CREATE %b %b $ MKSTREAM", stream.data(),
+                   stream.size(), group.data(), group.size())));
+  if (!reply || conn.get()->err != 0) {
+    conn.markBroken();
+    LOG_ERROR("RedisClient::xgroupCreateFromNow: connection lost");
+    return false;
+  }
+  if (reply->type == REDIS_REPLY_STATUS) {
+    return true; // "OK"
+  }
+  if (reply->type == REDIS_REPLY_ERROR) {
+    std::string msg(reply->str, reply->len);
+    if (msg.find("BUSYGROUP") != std::string::npos) {
+      return true; // 组已存在，幂等视为成功
+    }
+    LOG_ERROR("RedisClient::xgroupCreateFromNow: server error: %s", msg.c_str());
+    return false;
+  }
+  LOG_ERROR("RedisClient::xgroupCreateFromNow: unexpected reply type %d",
+            reply->type);
   return false;
 }
 

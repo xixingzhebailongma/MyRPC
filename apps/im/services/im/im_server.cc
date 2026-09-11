@@ -99,7 +99,7 @@ ImServer::ImServer(const std::string &ip, int port,
     pev.set_reason(ev.reason);
     std::string payload;
     pev.SerializeToString(&payload);
-    message_store_.publish("im:user:events", payload);
+    message_store_.publishEvent(payload);
   });
   //注册ACK确认&离线消息拉取（注意：proto类型是typo版PullOfflien...)
   // 两参 handler 一律用 lambda 而非 std::bind：bind
@@ -175,13 +175,15 @@ ImServer::ImServer(const std::string &ip, int port,
   // 注册到 etcd：所有 IM 节点共享 "ImService" 服务名，供 Gateway 发现
   rpc_server_.enableRegistry(etcd_endpoints, "ImService", ip_, port_);
   // 连接断开 / 握手超时由 Gateway 负责，通过 ClientDisconnect 通知本节点清理。
-  // 订阅路由变更事件：上线→预暖缓存，下线→失效缓存
+  // 订阅路由变更事件：上线→预暖缓存，下线→失效缓存（Stream 广播，断线不丢）
   route_subscriber_.start(
-      redis_ip_, redis_port_, "im:route:events",
+      redis_ip_, redis_port_, immq::kRouteEventsStream,
+      "im:route:events:im:" + ip_ + ":" + std::to_string(port_),
       [this](const std::string &payload) { this->onRouteChange(payload); });
-  // 订阅用户数据变更事件：跨节点踢下线
+  // 订阅用户数据变更事件：跨节点踢下线（Stream 广播，断线不丢）
   user_subscriber_.start(
-      redis_ip_, redis_port_, "im:user:events",
+      redis_ip_, redis_port_, immq::kUserEventsStream,
+      "im:user:events:im:" + ip_ + ":" + std::to_string(port_),
       [this](const std::string &payload) { this->onUserChanged(payload); });
 }
 
@@ -677,7 +679,7 @@ void ImServer::publishUserEvent(im::UserChangedEvent::Type type,
   ev.set_target_id(target_id);
   std::string payload;
   ev.SerializeToString(&payload);
-  message_store_.publish("im:user:events", payload);
+  message_store_.publishEvent(payload);
 }
 
 void ImServer::kickOffline(const im::UserChangedEvent &ev) {

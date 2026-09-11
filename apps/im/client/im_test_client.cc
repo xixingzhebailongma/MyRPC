@@ -51,8 +51,8 @@ static bool saveTokens(const std::string &at, const std::string &rt) {
   std::ofstream f(kStateFile, std::ios::trunc);
   if (!f)
     return false;
-  f << "access_token =" << at << "\n";
-  f << "refresh_toekn=" << rt << "\n";
+  f << "access_token=" << at << "\n";
+  f << "refresh_token=" << rt << "\n";
   return true;
 }
 

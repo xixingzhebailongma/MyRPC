@@ -73,6 +73,7 @@ private:
     std::shared_ptr<std::promise<std::string>> promise;
     ResponseCallback callback;
     TimerId timeout_timer;
+    std::string wire; // 连接未就绪时暂存的待发请求帧，onConnection 统一 flush
   };
 
   void startInLoop();

@@ -33,12 +33,13 @@ RpcServer::RpcServer(const std::string &ip, uint16_t port, int threadnum,
 RpcServer::~RpcServer() = default;
 
 void RpcServer::start() {
-  server_.start();
-
-  // 创建租约续期器（setIdempotencyStore 须在 start() 前完成注入）
+  // 先创建租约续期器（setIdempotencyStore 须在 start() 前完成注入）
   renewer_ = std::make_unique<LeaseRenewer>(idemStore_.get());
   renewer_->start();
 
+  // 先注册到 etcd，再启动阻塞的主事件循环。
+  // 注意：server_.start() = mainloop_->run() 永不返回，注册必须放在它前面，
+  // 否则服务永远不会出现在 etcd 里。
   if (registry_) {
     // 首轮失败不再意味着永久降级：EtcdClient 后台线程会持续重试注册
     if (!registry_->registerService()) {
@@ -46,6 +47,8 @@ void RpcServer::start() {
                "retrying in background");
     }
   }
+
+  server_.start(); // 阻塞：主事件循环（mainloop_->run()）
 }
 
 void RpcServer::stop() {
