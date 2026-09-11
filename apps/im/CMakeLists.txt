@@ -21,7 +21,7 @@ add_library(auth STATIC
     services/auth/session_store.cc
     services/auth/auth_server.cc
 )
-target_include_directories(auth PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/services/auth)
+target_include_directories(auth PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/services/auth ${CMAKE_CURRENT_SOURCE_DIR}/common/mq)
 target_link_libraries(auth
     PUBLIC redis
     PUBLIC db
@@ -38,7 +38,7 @@ add_library(redis STATIC
     common/redis/redis_client.cc
     common/redis/redis_reply.cc
     common/redis/redis_pool.cc
-    common/redis/redis_subscriber.cc
+    common/redis/stream_subscriber.cc
 )
 target_include_directories(redis PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/common/redis)
 target_link_libraries(redis
@@ -79,7 +79,7 @@ target_link_libraries(sig
 add_library(route STATIC
     services/route/route_server.cc
 )
-target_include_directories(route PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/services/route)
+target_include_directories(route PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/services/route ${CMAKE_CURRENT_SOURCE_DIR}/common/mq)
 target_link_libraries(route
     PUBLIC redis
     PUBLIC rpc_server
@@ -103,7 +103,7 @@ target_link_libraries(db
 add_library(message_store STATIC
     services/im/message_store.cc
 )
-target_include_directories(message_store PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/services/im)
+target_include_directories(message_store PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/services/im ${CMAKE_CURRENT_SOURCE_DIR}/common/mq)
 target_link_libraries(message_store
     PUBLIC redis
     PUBLIC im_proto

@@ -5,7 +5,7 @@
 #include "lb_rpc_client.h"
 #include "message_store.h"
 #include "redis_client.h"
-#include "redis_subscriber.h"
+#include "stream_subscriber.h"
 #include "route_cache.h"
 #include "rpc_channel_pool.h"
 #include "rpc_server.h"
@@ -121,7 +121,7 @@ private:
   void kickOffline(const im::UserChangedEvent &ev);
 
   // 成员（在 route_subscriber_ 附近加）
-  RedisSubscriber user_subscriber_; // 订阅用户数据变更事件
+  StreamSubscriber user_subscriber_; // 订阅用户数据变更事件（Stream 广播）
 
   RpcServer rpc_server_;
   UserManager user_manager_;
@@ -132,7 +132,7 @@ private:
   LbRpcClient route_client_; //调用Route Server
   LbRpcClient auth_client_;  //调用 Auth Server（无状态，轮询即可）
   RouteCache route_cache_;   // 本地路由缓存
-  RedisSubscriber route_subscriber_; // 订阅路由变更事件
+  StreamSubscriber route_subscriber_; // 订阅路由变更事件（Stream 广播）
   //到其它IM Server的连接池（自持锁，调用方无需手动加锁）
   RpcChannelPool server_channels_;
 

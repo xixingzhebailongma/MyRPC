@@ -1,6 +1,7 @@
 #include "route_server.h"
 #include "EventLoop.h"
 #include "im.pb.h"
+#include "mq_constants.h"
 #include <functional>
 RouteServer::RouteServer(const std::string &ip, uint16_t port,
                          const std::string &redis_ip, int redis_port,
@@ -70,7 +71,8 @@ std::string RouteServer::handleRouteRegister(spConnection conn,
     s->set_conn_id(req.conn_id());
     std::string payload;
     ev.SerializeToString(&payload);
-    redis_.publish("im:route:events", payload);
+    redis_.xaddTrimmed(immq::kRouteEventsStream, immq::kBodyField, payload,
+                       immq::kEventsMaxLen);
   }
   resp.set_success(ok);
   std::string result;
@@ -146,7 +148,8 @@ RouteServer::handleRouteUnregister(spConnection conn,
   ev.mutable_server()->set_conn_id(req.conn_id());
   std::string payload;
   ev.SerializeToString(&payload);
-  redis_.publish("im:route:events", payload);
+  redis_.xaddTrimmed(immq::kRouteEventsStream, immq::kBodyField, payload,
+                     immq::kEventsMaxLen);
   resp.set_success(ok);
   std::string result;
   resp.SerializeToString(&result);

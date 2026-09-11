@@ -119,7 +119,8 @@ void AsyncRpcChannel::callImpl(
     if (self->conn_ && !self->conn_->disconnected()) {
       self->conn_->send(std::move(wire));
     } else {
-      self->failCall(seq, static_cast<int32_t>(RpcError::CONNECTION_BROKEN));
+      // 异步建连尚未完成：暂存待发帧，等 onConnection 建立后统一 flush
+      self->pending_[seq].wire = std::move(wire);
     }
   });
 }
@@ -159,6 +160,13 @@ void AsyncRpcChannel::onConnection(std::shared_ptr<Connection> conn) {
   connected_.store(true);
   last_active_ms_ = nowMs();
   heartbeat_miss_ = 0;
+  // 连接就绪：把建连前暂存的请求统一发出
+  for (auto &kv : pending_) {
+    if (!kv.second.wire.empty()) {
+      conn->send(std::move(kv.second.wire));
+      kv.second.wire.clear();
+    }
+  }
 }
 
 void AsyncRpcChannel::onClose(std::shared_ptr<Connection> conn) {
