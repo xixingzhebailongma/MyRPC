@@ -7,6 +7,7 @@
 #include "TcpClient.h"
 #include "rpc_error_code.h"
 #include <chrono>
+#include <sys/socket.h>
 
 namespace {
 uint64_t nowMs() {
@@ -46,10 +47,22 @@ void AsyncRpcChannel::close() {
     self->loop_->cancel(self->heartbeat_timer_);
     self->loop_->cancel(self->idle_timer_);
     self->client_->stop();
-    self->conn_.reset();
+    // 注意：不在此 reset conn_。stop() 的 shutdown() 需要在 loop 线程之外
+    // 拿到 conn_ 的 fd 去 ::shutdown 发 FIN；若这里提前 reset，极端竞态下
+    // 对端 socket 会因 lambda 仍持有 conn 而迟迟不关闭（对端 recv 永久阻塞）。
     self->connected_.store(false);
     self->failPending(static_cast<int32_t>(RpcError::CONNECTION_BROKEN));
   });
+}
+
+void AsyncRpcChannel::shutdown() {
+  // 直接向对端发 FIN：即便 teardown 链里还有 lambda 持有 conn 的 shared_ptr
+  // （导致 Connection 尚未析构、fd 未 close），对端的阻塞 recv 也能立刻读到 EOF。
+  if (conn_) {
+    ::shutdown(conn_->fd(), SHUT_RDWR);
+  }
+  conn_.reset();
+  client_.reset();
 }
 
 std::future<std::string> AsyncRpcChannel::Call(const std::string &service,

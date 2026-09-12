@@ -12,6 +12,11 @@ std::atomic<bool> running{true};
 void signalHandler(int) { running = false; }
 
 int main(int argc, char *argv[]) {
+  // SSL_write 无法带 MSG_NOSIGNAL：TLS 客户端断开时，服务端向已断连接写会触发
+  // SIGPIPE，默认动作是终止进程（导致 acceptor 随进程一起死掉，后续 connect
+  // ECONNREFUSED）。必须忽略，否则「一个 TLS 客户端断开」会打垮整个 gateway。
+  signal(SIGPIPE, SIG_IGN);
+
   // 环境变量 MYRPC_LOG_DROP_ON_OVERFLOW：未设置=丢弃（默认）；设为 "0"=阻塞（不丢日志）
   bool drop_on_overflow = true;
   if (const char *env = std::getenv("MYRPC_LOG_DROP_ON_OVERFLOW"))

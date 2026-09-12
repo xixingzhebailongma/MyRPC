@@ -12,6 +12,9 @@ std::atomic<bool> running{true};
 void signalHandler(int) { running = false; }
 
 int main(int argc, char *argv[]) {
+  // 对端断开时向已断 socket 写会触发 SIGPIPE，默认终止进程；忽略它，避免单个断开连接打垮整个服务进程。
+  signal(SIGPIPE, SIG_IGN);
+
   // 环境变量 MYRPC_LOG_DROP_ON_OVERFLOW：未设置=丢弃（默认）；设为 "0"=阻塞（不丢日志）
   bool drop_on_overflow = true;
   if (const char *env = std::getenv("MYRPC_LOG_DROP_ON_OVERFLOW"))
