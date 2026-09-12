@@ -78,6 +78,13 @@ target_link_libraries(test_async_rpc_client
     PRIVATE Threads::Threads
 )
 
+add_executable(test_async_lb_rpc_client test_async_lb_rpc_client.cc)
+target_link_libraries(test_async_lb_rpc_client
+    PRIVATE async_lb_rpc_client
+    PRIVATE rpc_server
+    PRIVATE Threads::Threads
+)
+
 # ---- 框架端到端集成测试（无外部依赖）----
 add_executable(test_rpc_server_e2e test_rpc_server_e2e.cc)
 target_link_libraries(test_rpc_server_e2e
@@ -93,12 +100,32 @@ target_link_libraries(test_rpc_server_concurrency
     PRIVATE Threads::Threads
 )
 
+add_executable(test_rpc_server_idempotency test_rpc_server_idempotency.cc)
+target_link_libraries(test_rpc_server_idempotency
+    PRIVATE rpc_server
+    PRIVATE rpc_client
+    PRIVATE Threads::Threads
+)
+
 add_executable(test_rpc_lb_failover_etcd test_rpc_lb_failover_etcd.cc)
 target_link_libraries(test_rpc_lb_failover_etcd
     PRIVATE rpc_server
     PRIVATE lb_rpc_client
     PRIVATE Threads::Threads
 )
+
+# ---- TLS 握手端到端：spawn gateway_server（客户端侧 TLS） + ImClientConn ----
+add_executable(test_gateway_tls test_gateway_tls.cc)
+target_include_directories(test_gateway_tls PRIVATE ${CMAKE_SOURCE_DIR}/apps/im/client)
+target_link_libraries(test_gateway_tls
+    PRIVATE im_client_conn
+    PRIVATE registry
+    PRIVATE Threads::Threads
+)
+# 依赖真实 gateway_server 二进制，注入其绝对路径；确保先构建。
+add_dependencies(test_gateway_tls gateway_server)
+target_compile_definitions(test_gateway_tls
+    PRIVATE GATEWAY_SERVER_BIN="$<TARGET_FILE:gateway_server>")
 
 # ---- CTest 注册 ----
 add_test(NAME test_queue COMMAND test_queue)
@@ -116,6 +143,28 @@ add_test(NAME test_rpc_channel_metrics COMMAND test_rpc_channel_metrics)
 add_test(NAME test_idempotency_lru COMMAND test_idempotency_lru)
 add_test(NAME test_idempotency_redis COMMAND test_idempotency_redis)
 add_test(NAME test_async_rpc_client COMMAND test_async_rpc_client)
+add_test(NAME test_async_lb_rpc_client COMMAND test_async_lb_rpc_client)
 add_test(NAME test_rpc_server_e2e COMMAND test_rpc_server_e2e)
 add_test(NAME test_rpc_server_concurrency COMMAND test_rpc_server_concurrency)
+add_test(NAME test_rpc_server_idempotency COMMAND test_rpc_server_idempotency)
 add_test(NAME test_rpc_lb_failover_etcd COMMAND test_rpc_lb_failover_etcd)
+add_test(NAME test_gateway_tls COMMAND test_gateway_tls)
+
+# ---- IM 全链路 E2E：spawn route/auth/im/gateway/deliver + ImClientConn ----
+add_executable(test_im_e2e test_im_e2e.cc)
+target_link_libraries(test_im_e2e
+    PRIVATE im_client_conn
+    PRIVATE im_proto
+    PRIVATE registry
+    PRIVATE protobuf::libprotobuf
+    PRIVATE Threads::Threads
+)
+# 依赖真实服务二进制，注入绝对路径；确保先构建。
+add_dependencies(test_im_e2e route_server auth_server im_server gateway_server deliver_server)
+target_compile_definitions(test_im_e2e PRIVATE
+    ROUTE_SERVER_BIN="$<TARGET_FILE:route_server>"
+    AUTH_SERVER_BIN="$<TARGET_FILE:auth_server>"
+    IM_SERVER_BIN="$<TARGET_FILE:im_server>"
+    GATEWAY_SERVER_BIN="$<TARGET_FILE:gateway_server>"
+    DELIVER_SERVER_BIN="$<TARGET_FILE:deliver_server>")
+add_test(NAME test_im_e2e COMMAND test_im_e2e)
