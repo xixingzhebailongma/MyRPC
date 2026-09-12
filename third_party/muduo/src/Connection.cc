@@ -32,15 +32,22 @@ Connection::Connection(EventLoop *loop, std::unique_ptr<Socket> clientsock,
       SSL_set_accept_state(ssl_.get());
     }
   }
+  // 注意：不再在此处 enablereading()。
+  // 读事件注册移到 TcpServer::newconnection 里 tieChannel() 之后执行，
+  // 否则 channel 在 tie_（生命周期守卫）尚未写入前就可能触发 handleevent()，
+  // 与 tie 写入构成数据竞争（weak_ptr 非线程安全，会破坏控制块）。
+}
 
+bool Connection::enableReading() {
   if (!clientchannel_->enablereading()) {
     LOG_ERROR("Connection: failed to register read "
               "event for fd %d. Marking as "
               "disconnected.",
               clientsock_->fd());
     disconnect_ = true;
-    // 不能在构造函数里调closecallback()，因为shared_from_this()此时无效。
+    return false;
   }
+  return true;
 }
 
 Connection::~Connection() = default;

@@ -28,7 +28,9 @@ bool UserManager::userOfflineByConn(const std::string &conn_key,
     return false; // 未认证连接关闭：无会话可清
   }
 
-  const std::string &sid = fit->second;
+  // 注意：必须拷贝而非引用。conn_key_to_session_.erase(fit) 会析构 fit->second，
+  // 若 sid 是引用，后面 uit->second.erase(sid) 会踩到悬垂引用（use-after-free）。
+  std::string sid = fit->second;
   std::string user_id;
   auto sit = sessions_.find(sid);
   if (sit != sessions_.end()) {

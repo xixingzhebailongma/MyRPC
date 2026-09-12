@@ -1,7 +1,10 @@
 build/
+build-asan/
+build-tsan/
 .cache/
 **/.clangd
 compile_commands.json
 *.pb.cc
 *.pb.h
 apps/im/certs/
+*.log

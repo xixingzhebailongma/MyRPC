@@ -64,6 +64,11 @@ uint32_t Channel::revents() { return revents_; }
 
 void Channel::handleevent()
 {
+    // 生命周期守卫：持有 owner（Connection）的强引用直到本函数结束。
+    // onmessage 读到对端关闭会走 closecallback() → 释放最后一个 shared_ptr，
+    // 若没有此守卫，本 Channel 会在回调返回后成为悬垂指针（heap-use-after-free）。
+    std::shared_ptr<void> guard = tie_.lock();
+
     if (revents_ & EPOLLERR)
         errorcallback_();
 

@@ -105,6 +105,9 @@ void TcpServer::newconnection(std::unique_ptr<Socket> clientsock) {
   spConnection conn(
       new Connection(subloops_[clientsock->fd() % threadnum_].get(),
                      std::move(clientsock), tls_ctx_.get()));
+  // Channel 绑定到 Connection 的 shared_ptr：handleevent() 回调期间若连接关闭、
+  // 最后一个 shared_ptr 被释放，Channel 仍能存活到回调返回（避免 use-after-free）。
+  conn->tieChannel();
   conn->setclosecallback(
       std::bind(&TcpServer::closeconnection, this, std::placeholders::_1));
   conn->seterrorcallback(
@@ -126,6 +129,11 @@ void TcpServer::newconnection(std::unique_ptr<Socket> clientsock) {
   if (newconnectioncb_)
     newconnectioncb_(conn);
   // 回调上层业务类的HandleNewConnection()。
+
+  // 最后再注册读事件：tie 已就绪、上层 newconnectioncb_ 已把 fd 登记进自己的
+  // 表（如 gateway 的 fd_to_conn_），channel 才会开始触发 handleevent()，
+  // 避免「channel 先收到帧、上层还没登记」的跨线程丢帧竞争。
+  conn->enableReading();
 }
 
 // 关闭客户端的连接，在Connection类中回调此函数。

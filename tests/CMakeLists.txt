@@ -77,3 +77,45 @@ target_link_libraries(test_async_rpc_client
     PRIVATE protocol
     PRIVATE Threads::Threads
 )
+
+# ---- 框架端到端集成测试（无外部依赖）----
+add_executable(test_rpc_server_e2e test_rpc_server_e2e.cc)
+target_link_libraries(test_rpc_server_e2e
+    PRIVATE rpc_server
+    PRIVATE rpc_client
+    PRIVATE Threads::Threads
+)
+
+add_executable(test_rpc_server_concurrency test_rpc_server_concurrency.cc)
+target_link_libraries(test_rpc_server_concurrency
+    PRIVATE rpc_server
+    PRIVATE rpc_client
+    PRIVATE Threads::Threads
+)
+
+add_executable(test_rpc_lb_failover_etcd test_rpc_lb_failover_etcd.cc)
+target_link_libraries(test_rpc_lb_failover_etcd
+    PRIVATE rpc_server
+    PRIVATE lb_rpc_client
+    PRIVATE Threads::Threads
+)
+
+# ---- CTest 注册 ----
+add_test(NAME test_queue COMMAND test_queue)
+add_test(NAME test_buffer COMMAND test_buffer)
+add_test(NAME test_im_conn_concurrency COMMAND test_im_conn_concurrency)
+add_test(NAME test_eventloop_functor_reentry COMMAND test_eventloop_functor_reentry)
+add_test(NAME test_rpc_channel_frame COMMAND test_rpc_channel_frame)
+add_test(NAME test_rpc_channel_concurrency COMMAND test_rpc_channel_concurrency)
+add_test(NAME test_rpc_channel_pool_reap COMMAND test_rpc_channel_pool_reap)
+add_test(NAME test_threadpool COMMAND test_threadpool)
+add_test(NAME test_load_balancer COMMAND test_load_balancer)
+add_test(NAME test_rpc_channel_circuit_breaker COMMAND test_rpc_channel_circuit_breaker)
+add_test(NAME test_rpc_channel_heartbeat COMMAND test_rpc_channel_heartbeat)
+add_test(NAME test_rpc_channel_metrics COMMAND test_rpc_channel_metrics)
+add_test(NAME test_idempotency_lru COMMAND test_idempotency_lru)
+add_test(NAME test_idempotency_redis COMMAND test_idempotency_redis)
+add_test(NAME test_async_rpc_client COMMAND test_async_rpc_client)
+add_test(NAME test_rpc_server_e2e COMMAND test_rpc_server_e2e)
+add_test(NAME test_rpc_server_concurrency COMMAND test_rpc_server_concurrency)
+add_test(NAME test_rpc_lb_failover_etcd COMMAND test_rpc_lb_failover_etcd)

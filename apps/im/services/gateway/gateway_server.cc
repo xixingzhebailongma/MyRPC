@@ -52,13 +52,17 @@ void GatewayServer::enableClientTls(const std::string &cert,
 }
 
 void GatewayServer::start() {
+  // client_server_.start() 会阻塞在当前线程跑主循环（accept），
+  // 所以 rpc_server_（接收 IM 回推）必须放到独立线程，否则永远不会 accept。
+  rpc_thread_ = std::thread([this] { rpc_server_.start(); });
   client_server_.start();
-  rpc_server_.start();
 }
 
 void GatewayServer::stop() {
   client_server_.stop();
   rpc_server_.stop();
+  if (rpc_thread_.joinable())
+    rpc_thread_.join();
   work_pool_.stop();
 }
 

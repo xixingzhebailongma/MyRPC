@@ -12,6 +12,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <unordered_map>
 
 // IM 接入层（Gateway）：持有客户端长连接，透传转发到固定 IM 节点，
@@ -70,6 +71,7 @@ private:
   TcpServer client_server_; // 客户端侧：持有长连接
   ThreadPool work_pool_;    // 跑阻塞的 RPC 转发，避免阻塞 IO 线程
   RpcServer rpc_server_;    // IM 侧：接收回推
+  std::thread rpc_thread_;  // 跑 rpc_server_ 的独立线程（start() 里 client_server_ 阻塞主线程）
 
   LbRpcClient im_client_;      // 发现并选择 IM 节点
   LbRpcClient auth_client_;    // 调用 Auth（ResolveTicket）
