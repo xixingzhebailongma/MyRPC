@@ -38,6 +38,23 @@ void AsyncRpcChannel::connect() {
   loop_->queueinloop([self] { self->startInLoop(); });
 }
 
+void AsyncRpcChannel::reconnect() {
+  if (closed_.load())
+    return;
+  auto self = shared_from_this();
+  // 先在 loop 线程上排队，再延迟重连；两个 closed_ 检查兜底「重连期间被
+  // close」的竞态。shared_ptr 捕获避免 channel 提前析构后定时器悬垂。
+  loop_->queueinloop([self] {
+    if (self->closed_.load())
+      return;
+    self->loop_->runAfter(self->cfg_.channel_reconnect_delay_ms / 1000.0,
+                          [self] {
+                            if (!self->closed_.load())
+                              self->client_->connect();
+                          });
+  });
+}
+
 void AsyncRpcChannel::close() {
   bool expected = false;
   if (!closed_.compare_exchange_strong(expected, true))
@@ -156,7 +173,9 @@ void AsyncRpcChannel::startInLoop() {
     if (auto s = weak.lock())
       s->onMessage(c, b);
   });
-  client_->enableRetry();
+  // 不调 enableRetry()：断线重连的决定权交给上层（AsyncRpcClient 按
+  // channels_ 是否仍持有本 channel 判断）。本层只在 onClose 里通过
+  // disconnect_handler_ 上报，由上层决定是否 reconnect()。
   client_->connect();
 
   if (cfg_.heartbeat_interval_ms > 0) {
@@ -187,6 +206,10 @@ void AsyncRpcChannel::onClose(std::shared_ptr<Connection> conn) {
   if (conn_ == conn)
     conn_.reset();
   failPending(static_cast<int32_t>(RpcError::CONNECTION_BROKEN));
+  // 被动断开：上报上层，由 AsyncRpcClient 决定是否重连。
+  // 主动 close()/shutdown() 已置 closed_，这里直接跳过（不会重连）。
+  if (!closed_.load() && disconnect_handler_)
+    disconnect_handler_(shared_from_this());
 }
 
 void AsyncRpcChannel::onMessage(std::shared_ptr<Connection> conn, Buffer &buf) {

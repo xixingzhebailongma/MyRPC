@@ -55,6 +55,17 @@ AsyncRpcClient::getOrCreate(const std::string &ip, uint16_t port) {
         }
         self->close();
       });
+  ch->setDisconnectHandler([this, key](std::shared_ptr<AsyncRpcChannel> self) {
+    // 断线重连的唯一裁决点：仍在本池中（未被空闲回收/removeExcept 剔除）才重连。
+    bool reconnect = false;
+    {
+      std::lock_guard<std::mutex> lk(mutex_);
+      auto it = channels_.find(key);
+      reconnect = (it != channels_.end() && it->second == self);
+    }
+    if (reconnect)
+      self->reconnect();
+  });
   ch->setIdleTimeout(cfg_.channel_idle_ttl_ms);
   channels_[key] = ch;
   return ch;

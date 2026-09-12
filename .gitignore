@@ -1,6 +1,6 @@
-build/
-build-asan/
-build-tsan/
+# CMake 构建目录：每个配置一个独立目录（build/、build-asan/、build-tsan/、
+# build-ubsan/、build-bench/ 等），统一用 build*/ 忽略，避免逐个枚举。
+build*/
 .cache/
 **/.clangd
 compile_commands.json
@@ -8,4 +8,3 @@ compile_commands.json
 *.pb.h
 apps/im/certs/
 *.log
-build-ubsan/

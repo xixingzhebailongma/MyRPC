@@ -35,14 +35,18 @@ public:
   using ResponseCallback =
       std::function<void(std::string body, int32_t error_code)>;
   using PushHandler = std::function<void(const RpcMessage &msg)>;
+  // 连接被动断开时的回调（loop 线程内调用）：由 AsyncRpcClient 绑定，
+  // 以「channels_ 是否仍持有本 channel」为准决定是否重连。
+  using DisconnectHandler = std::function<void(std::shared_ptr<AsyncRpcChannel>)>;
 
   // server_ip 为点分十进制 IP（与 RpcChannel 一致，不含域名）。
   AsyncRpcChannel(EventLoop *loop, const std::string &server_ip,
                   uint16_t server_port, const RpcClientConfig &cfg = {});
   ~AsyncRpcChannel();
 
-  void connect(); // 建连（首次 Call 会自动调用）
-  void close();   // 断开并停止重连，失败所有在途请求
+  void connect();   // 建连（首次 Call 会自动调用）
+  void reconnect(); // 断线后重连（由 DisconnectHandler 决定后调用，任意线程可调）
+  void close();     // 断开并停止重连，失败所有在途请求
   // 同步关闭连接（不投递 loop）。供 AsyncRpcClient::stop() 在 join 后调用：
   // 极端竞态下 close() 排队的异步 teardown 可能没被 loop 执行，此方法直接
   // reset conn_/client_，确保对端 socket 一定被关闭（避免对端 recv 永久阻塞）。
@@ -60,6 +64,9 @@ public:
 
   bool connected() const { return connected_.load(); }
   void setPushHandler(PushHandler h) { push_handler_ = std::move(h); }
+  void setDisconnectHandler(DisconnectHandler h) {
+    disconnect_handler_ = std::move(h);
+  }
 
   // 熔断状态（供 AsyncLbRpcClient 跳过熔断节点）
   bool isCircuitOpen() const;
@@ -136,6 +143,7 @@ private:
   std::atomic<bool> closed_{false};
 
   PushHandler push_handler_;
+  DisconnectHandler disconnect_handler_;
 
   std::atomic<uint64_t> total_calls_{0};
   std::atomic<uint64_t> success_calls_{0};
