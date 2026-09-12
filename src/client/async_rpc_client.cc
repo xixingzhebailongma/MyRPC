@@ -85,6 +85,8 @@ void AsyncRpcClient::stop() {
       t.join();
   {
     std::lock_guard<std::mutex> lk(mutex_);
+    for (auto &kv : channels_)
+      kv.second->shutdown(); // 同步关闭 socket：兜底异步 teardown 没被 loop 执行的竞态
     channels_.clear();
   }
 }

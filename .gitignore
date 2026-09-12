@@ -8,3 +8,4 @@ compile_commands.json
 *.pb.h
 apps/im/certs/
 *.log
+build-ubsan/

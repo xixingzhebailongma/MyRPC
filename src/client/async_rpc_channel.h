@@ -43,6 +43,10 @@ public:
 
   void connect(); // 建连（首次 Call 会自动调用）
   void close();   // 断开并停止重连，失败所有在途请求
+  // 同步关闭连接（不投递 loop）。供 AsyncRpcClient::stop() 在 join 后调用：
+  // 极端竞态下 close() 排队的异步 teardown 可能没被 loop 执行，此方法直接
+  // reset conn_/client_，确保对端 socket 一定被关闭（避免对端 recv 永久阻塞）。
+  void shutdown();
 
   std::future<std::string> Call(const std::string &service,
                                 const std::string &method,
