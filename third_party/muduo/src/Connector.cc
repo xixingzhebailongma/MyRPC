@@ -44,8 +44,10 @@ void Connector::stop() {
 }
 
 void Connector::startInLoop() {
-  if (state_ == States::kConnecting)
-    return; // 已有一次 connect 在途，避免重复建连
+  // 已有一次 connect 在途，避免重复建连；或已被 stop() 置 connect_=false
+  // （例如已 armed 的退避定时器在 stop 之后触发），不再发起新连接。
+  if (state_ == States::kConnecting || !connect_)
+    return;
   connect();
 }
 

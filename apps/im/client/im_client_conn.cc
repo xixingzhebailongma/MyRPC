@@ -16,9 +16,9 @@ ImClientConn::ImClientConn() = default;
 ImClientConn::~ImClientConn() { close(); }
 
 void ImClientConn::enableTls(const std::string &ca_path, bool insecure) {
-  tls_ = true;
-  tls_ca_ = ca_path;
-  tls_insecure_ = insecure;
+  tls_ = true;              // 打开 TLS 开关
+  tls_ca_ = ca_path;        // 记下 CA 证书路径
+  tls_insecure_ = insecure; // 是否跳过证书校验
 }
 
 // 设 fd 为非阻塞（TLS 数据阶段配合 poll 使用）

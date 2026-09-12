@@ -15,4 +15,5 @@ struct RpcClientConfig {
   int circuit_backoff_max_ms = 30000;   // 熔断退避上限
   uint64_t channel_idle_ttl_ms = 60000; // channel 空闲回收阈值
   uint64_t channel_reap_interval_ms = 10000; // channel 回收扫描周期
+  int channel_reconnect_delay_ms = 3000; // 断线后重连延迟（与原 TcpClient 3s 一致）
 };
