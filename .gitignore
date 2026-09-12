@@ -2,6 +2,7 @@
 # build-ubsan/、build-bench/ 等），统一用 build*/ 忽略，避免逐个枚举。
 build*/
 .cache/
+.claude/
 **/.clangd
 compile_commands.json
 *.pb.cc
