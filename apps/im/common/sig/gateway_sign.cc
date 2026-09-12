@@ -43,6 +43,7 @@ std::string buildCanonical(const RpcHeader &hdr) {
   c += hdr.identity().username();
   c += '\n';
   c += std::to_string(hdr.identity().authenticated_at());
+  return c;
 }
 
 std::string sign(const std::string &secret, const RpcHeader &hdr) {

@@ -1,1 +1,0 @@
-/usr/bin/c++ -fsanitize=thread -g -O1 -g -O0 CMakeFiles/im_test_client.dir/client/im_test_client.cc.o -o im_test_client  libim_client_conn.a libim_proto.a /usr/lib/x86_64-linux-gnu/libprotobuf.so ../../src/protocol/libprotocol.a /usr/lib/x86_64-linux-gnu/libprotobuf.so 

@@ -1,2 +1,0 @@
-/usr/bin/ar qc liblogger.a CMakeFiles/logger.dir/Logger.cc.o CMakeFiles/logger.dir/AsyncLogger.cc.o
-/usr/bin/ranlib liblogger.a

@@ -1,1 +1,0 @@
-/usr/bin/c++ -fsanitize=thread -g -O1 -g -O0 CMakeFiles/test_queue.dir/test_queue.cc.o -o test_queue  ../src/logger/liblogger.a 

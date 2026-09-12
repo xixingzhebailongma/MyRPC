@@ -3,6 +3,7 @@
 #include "rpc_client_config.h"
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -46,7 +47,11 @@ public:
   RpcChannelPool &operator=(const RpcChannelPool &) = delete;
 
   ~RpcChannelPool() {
-    reaper_running_.store(false);
+    {
+      std::lock_guard<std::mutex> lock(reaper_mutex_);
+      reaper_running_.store(false);
+    }
+    reaper_cv_.notify_all();
     if (reaper_.joinable())
       reaper_.join();
   }
@@ -110,10 +115,18 @@ public:
 
 private:
   // 后台回收循环：每 reap_interval_ 扫一次。
+  // 用 condition_variable::wait_for 而非 sleep_for，析构时 notify 可立即唤醒，
+  // 避免 ~RpcChannelPool 的 join 阻塞到当前整个扫描周期结束。
   void reaperLoop() {
+    // 用独立的 reaper_mutex_ 做唤醒互斥，与保护 channels_ 的 mutex_ 解耦，
+    // 避免 reaper 与 getOrCreate/removeExcept 在同一把锁上互相阻塞。
+    std::unique_lock<std::mutex> lock(reaper_mutex_);
     while (reaper_running_.load()) {
-      std::this_thread::sleep_for(reap_interval_);
-      reapOnce();
+      if (reaper_cv_.wait_for(lock, reap_interval_,
+                              [this] { return !reaper_running_.load(); })) {
+        break; // 析构唤醒，退出
+      }
+      reapOnce(); // 内部自己锁 mutex_（channels_ 守卫），与 reaper_mutex_ 无关
     }
   }
 
@@ -141,6 +154,8 @@ private:
   std::chrono::milliseconds reap_interval_;
   std::atomic<bool> reaper_running_{true};
   std::thread reaper_;
+  std::mutex reaper_mutex_;
+  std::condition_variable reaper_cv_;
   std::unordered_map<std::string, std::shared_ptr<RpcChannel>> channels_;
   std::mutex mutex_;
 };

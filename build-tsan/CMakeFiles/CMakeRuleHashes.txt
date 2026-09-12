@@ -1,5 +1,0 @@
-# Hashes of file build rules.
-a2a13be4c7215851e95f39fa0a2a6315 apps/im/auth.pb.h
-e026853a77cf45e72b5f6da531d2720c apps/im/im.pb.h
-acc33ec9cd5116203cb1f408f69b61d0 examples/user.pb.h
-c1ef51298449837f5cd22b35eb951cfd src/protocol/rpc_header.pb.h

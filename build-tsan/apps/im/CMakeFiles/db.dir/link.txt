@@ -1,2 +1,0 @@
-/usr/bin/ar qc libdb.a CMakeFiles/db.dir/db/user_dao.cc.o CMakeFiles/db.dir/db/mysql_pool.cc.o
-/usr/bin/ranlib libdb.a

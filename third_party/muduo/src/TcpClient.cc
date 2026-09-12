@@ -40,9 +40,12 @@ void TcpClient::newConnection(int sockfd) {
   std::unique_ptr<Socket> sock(new Socket(sockfd));
   sock->setipport(serverAddr_.ip(), serverAddr_.port());
   spConnection conn(new Connection(loop_, std::move(sock)));
+  conn->tieChannel(); // tie 守卫：防止回调链里 Connection 被析构后 Channel use-after-free
   conn->setclosecallback([this](spConnection c) { removeConnection(c); });
   conn->seterrorcallback([this](spConnection c) { removeConnection(c); });
   conn->setonmessagecallback(messageCallback_);
+  // 读事件注册已从 Connection 构造函数移到此处（须在 tieChannel 之后）。
+  conn->enableReading();
   connection_ = conn;
   if (connectionCallback_)
     connectionCallback_(conn);

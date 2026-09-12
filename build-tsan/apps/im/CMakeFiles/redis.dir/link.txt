@@ -1,2 +1,0 @@
-/usr/bin/ar qc libredis.a CMakeFiles/redis.dir/redis/redis_client.cc.o CMakeFiles/redis.dir/redis/redis_reply.cc.o CMakeFiles/redis.dir/redis/redis_pool.cc.o CMakeFiles/redis.dir/redis/redis_subscriber.cc.o
-/usr/bin/ranlib libredis.a

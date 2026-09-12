@@ -51,6 +51,14 @@ public:
              SSL_CTX *tls_ctx = nullptr);
   ~Connection();
 
+  // 把 Channel 绑定到自身 shared_ptr（tie 守卫）。
+  // 必须在 Connection 已置于 shared_ptr 之后调用（不能在本类构造函数里调）。
+  void tieChannel() { clientchannel_->tie(shared_from_this()); }
+
+  // 注册读事件（开始接收数据）。必须在 tieChannel() 之后调用，否则
+  // handleevent() 里的 tie_.lock() 会与 tie 写入数据竞争。
+  bool enableReading();
+
   int fd() const;
   std::string ip() const;
   uint16_t port() const;

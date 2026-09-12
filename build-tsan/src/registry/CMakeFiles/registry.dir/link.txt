@@ -1,2 +1,0 @@
-/usr/bin/ar qc libregistry.a CMakeFiles/registry.dir/etcd_client.cc.o CMakeFiles/registry.dir/service_discovery.cc.o CMakeFiles/registry.dir/service_registry.cc.o
-/usr/bin/ranlib libregistry.a

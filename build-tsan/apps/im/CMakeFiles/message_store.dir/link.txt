@@ -1,2 +1,0 @@
-/usr/bin/ar qc libmessage_store.a CMakeFiles/message_store.dir/server/message_store.cc.o
-/usr/bin/ranlib libmessage_store.a

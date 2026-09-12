@@ -1,1 +1,0 @@
-/usr/bin/c++ -fsanitize=thread -g -O1 -g -O0 CMakeFiles/test_buffer.dir/test_buffer.cc.o -o test_buffer  ../third_party/muduo/libmuduo.a ../src/logger/liblogger.a 

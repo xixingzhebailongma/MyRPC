@@ -1,2 +1,0 @@
-/usr/bin/ar qc libload_balancer.a CMakeFiles/load_balancer.dir/load_balancer.cc.o
-/usr/bin/ranlib libload_balancer.a

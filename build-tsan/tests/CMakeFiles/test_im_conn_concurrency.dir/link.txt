@@ -1,1 +1,0 @@
-/usr/bin/c++ -fsanitize=thread -g -O1 -g -O0 CMakeFiles/test_im_conn_concurrency.dir/test_im_conn_concurrency.cc.o -o test_im_conn_concurrency  ../apps/im/libim_client_conn.a ../src/protocol/libprotocol.a /usr/lib/x86_64-linux-gnu/libprotobuf.so 

@@ -1,2 +1,0 @@
-/usr/bin/ar qc libim_proto.a CMakeFiles/im_proto.dir/im.pb.cc.o
-/usr/bin/ranlib libim_proto.a
