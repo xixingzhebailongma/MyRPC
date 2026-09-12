@@ -70,14 +70,23 @@ void AsyncRpcClient::stop() {
   {
     std::lock_guard<std::mutex> lk(mutex_);
     for (auto &kv : channels_)
-      kv.second->close(); // 失败所有在途请求
-    channels_.clear();
+      kv.second->close(); // 投递 teardown 到各 loop（内部还会再 queue 一批
+                          // 捕获 this 的收尾 lambda）
+    // 注意：不能在这里 channels_.clear()。close() 已在 loop 上排队了
+    // TcpClient::stop()/Connector::stop() 捕获 this 的 lambda；若此刻释放
+    // channels_ 强引用，channel→TcpClient→Connector 可能先于那些 lambda
+    // 被析构，loop 排空时就会解引用已释放内存（use-after-free）。
+    // 因此先让 loop 跑完收尾、join 后再清空。
   }
   for (auto &loop : loops_)
     loop->stop();
   for (auto &t : threads_)
     if (t.joinable())
       t.join();
+  {
+    std::lock_guard<std::mutex> lk(mutex_);
+    channels_.clear();
+  }
 }
 
 size_t AsyncRpcClient::size() {
