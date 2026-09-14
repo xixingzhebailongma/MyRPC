@@ -55,16 +55,10 @@ AuthServer::AuthServer(const std::string &ip, uint16_t port,
                 std::placeholders::_1));
   // 4. 注册到 etcd
   rpc_server_.enableRegistry(etcd_endpoints, service_name, ip, port, 30);
-  // 5. 订阅用户数据变更事件：改密码/封禁/删号 → 吊销该用户全部会话（Stream 广播）
-  user_subscriber_.start(
-      redis_ip, redis_port, immq::kUserEventsStream,
-      "im:user:events:auth:" + ip_ + ":" + std::to_string(port_),
-      [this](const std::string &payload) { this->onUserChanged(payload); });
 }
 
 void AuthServer::start() { rpc_server_.start(); }
 void AuthServer::stop() {
-  user_subscriber_.stop();
   rpc_server_.stop();
 }
 
@@ -238,26 +232,4 @@ std::string AuthServer::handleKickAllSessions(const std::string &request_body) {
   resp.set_success(true);
   resp.set_kicked(kicked);
   return resp.SerializeAsString();
-}
-
-void AuthServer::onUserChanged(const std::string &payload) {
-  im::UserChangedEvent ev;
-  if (!ev.ParseFromString(payload)) {
-    return;
-  }
-
-  // 只有这些事件会导致会话失效；FRIEND_REMOVED 等不吊销会话
-  switch (ev.type()) {
-  case im::UserChangedEvent::PASSWORD_CHANGED:
-  case im::UserChangedEvent::USER_BANNED:
-  case im::UserChangedEvent::USER_DELETED:
-    break;
-  default:
-    return;
-  }
-  int kicked = session_store_.revokeAllSessions(ev.user_id());
-  if (kicked > 0) {
-    LOG_INFO("AuthServer: revoked %d sessions for user %s (type=%d)", kicked,
-             ev.user_id().c_str(), ev.type());
-  }
 }

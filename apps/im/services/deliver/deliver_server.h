@@ -2,7 +2,6 @@
 #include "im.pb.h"
 #include "lb_rpc_client.h"
 #include "message_store.h"
-#include "route_cache.h"
 #include "rpc_channel_pool.h"
 #include "stream_consumer.h"
 #include <atomic>
@@ -39,7 +38,6 @@ private:
   StreamConsumer consumer_;
   MessageStore message_store_; // 状态 + 离线 + 重试计数
   LbRpcClient route_client_;   // 发现 RouteService
-  RouteCache route_cache_;
   RpcChannelPool gateway_channels_; // 连各 Gateway
 
   std::string consumer_name_;

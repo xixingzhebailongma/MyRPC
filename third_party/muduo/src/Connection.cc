@@ -205,6 +205,24 @@ void Connection::send(std::shared_ptr<std::string> message) {
     });
   }
 }
+void Connection::sendThenClose(const char *data, size_t size) {
+  auto message = std::make_shared<std::string>(data, size);
+  if (disconnect_ == true) {
+    LOG_WARN("客户端连接已断开(fd=%d)，sendThenClose()直接返回。", fd());
+    return;
+  }
+  // 关键：close_after_send_ 必须在 sendinloop 把帧放进输出缓冲*之后*才置位。
+  // 若在调用瞬间置位，同一条连接上并发的另一帧（如 RPC 响应）的 writecallback
+  // 会先于本帧入缓冲看到该标志而提前关闭连接，导致本帧被丢弃。
+  std::weak_ptr<Connection> weak_self = shared_from_this();
+  loop_->queueinloop([weak_self, message]() {
+    auto self = weak_self.lock();
+    if (self) {
+      self->sendinloop(message);
+      self->close_after_send_.store(true);
+    }
+  });
+}
 void Connection::forceClose() {
   if (disconnect_ == true)
     return; // 已关闭
@@ -251,6 +269,10 @@ void Connection::writecallback() {
     }
     if (outputbuffer_.readableBytes() == 0) {
       clientchannel_->disablewriting();
+      if (close_after_send_.load()) {
+        closecallback(); // 帧已全部写出，此时关闭不会丢数据
+        return;
+      }
       if (sendcompletecallback_)
         sendcompletecallback_(shared_from_this());
     }
@@ -275,6 +297,10 @@ void Connection::writecallback() {
   // 发送完成判断移到循环外，逻辑与 TLS 分支（第 244–250 行）保持一致
   if (outputbuffer_.readableBytes() == 0) {
     clientchannel_->disablewriting();
+    if (close_after_send_.load()) {
+      closecallback(); // 帧已全部写出，此时关闭不会丢数据
+      return;
+    }
     if (sendcompletecallback_) {
       sendcompletecallback_(shared_from_this());
     }

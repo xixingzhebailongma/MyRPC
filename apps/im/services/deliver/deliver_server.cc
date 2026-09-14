@@ -148,15 +148,13 @@ void DeliverServer::onReclaim(const std::string &entry_id,
 
 std::vector<im::RouteServer>
 DeliverServer::resolveRoutes(const std::string &user_id) {
+  // 投递是核心路径：回源 Route 权威数据，不用本地缓存。
+  // deliver 不订阅路由事件，本地缓存会在「多端第二设备上线/下线」时陈旧，
+  // 导致漏投到新上线的设备（缓存最长 60s 才过期）。强一致回源更稳。
+  im::RouteQueryResponse resp = queryUserRoute(user_id);
   std::vector<im::RouteServer> servers;
-  if (!route_cache_.get(user_id, &servers)) {
-    im::RouteQueryResponse resp = queryUserRoute(user_id);
-    for (const auto &s : resp.servers()) {
-      servers.push_back(s);
-    }
-    if (resp.found()) {
-      route_cache_.put(user_id, servers);
-    }
+  for (const auto &s : resp.servers()) {
+    servers.push_back(s);
   }
   return servers;
 }

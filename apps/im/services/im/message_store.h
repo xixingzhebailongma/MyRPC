@@ -17,8 +17,6 @@ public:
 
   //连接Redis
   bool connect(const std::string &redis_ip, int redis_port);
-  // 发布用户数据变更事件到广播 Stream（替代 Pub/Sub，持久不丢）
-  bool publishEvent(const std::string &payload);
 
   // tryClaimRequest 的返回值：区分「首次」「重复」「出错(Redis 不可用)」
   enum class ClaimResult {

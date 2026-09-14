@@ -77,8 +77,7 @@ void GatewayServer::onNewConnection(spConnection conn) {
 
 void GatewayServer::onConnectionClosed(spConnection conn) {
   uint64_t conn_id = 0;
-  std::string im_ip;
-  uint16_t im_port = 0;
+  bool bound = false;
   {
     std::lock_guard<std::mutex> lk(mutex_);
     auto fit = fd_to_conn_.find(conn->fd());
@@ -88,16 +87,13 @@ void GatewayServer::onConnectionClosed(spConnection conn) {
     fd_to_conn_.erase(fit);
     auto it = conns_.find(conn_id);
     if (it != conns_.end()) {
-      im_ip = it->second.im_ip;
-      im_port = it->second.im_port;
+      bound = it->second.bound;
       conns_.erase(it);
     }
   }
-  // 已固定到某 IM 节点：异步通知其清理会话（别阻塞 IO 线程）
-  if (!im_ip.empty()) {
-    if (!work_pool_.tryAdd([this, conn_id, im_ip, im_port] {
-          notifyDisconnect(conn_id, im_ip, im_port);
-        }))
+  // 已注册路由的连接：异步通知任意 IM 节点清理路由（别阻塞 IO 线程）
+  if (bound) {
+    if (!work_pool_.tryAdd([this, conn_id] { notifyDisconnect(conn_id); }))
       LOG_WARN("Gateway: work pool full, dropping disconnect notify conn=%llu",
                (unsigned long long)conn_id);
   }
@@ -155,8 +151,6 @@ void GatewayServer::forwardToIm(uint64_t conn_id, std::string payload) {
   const std::string method = req.header().method_name();
 
   std::shared_ptr<Connection> conn;
-  std::string pinned_ip;
-  uint16_t pinned_port = 0;
   {
     std::lock_guard<std::mutex> lk(mutex_);
     auto it = conns_.find(conn_id);
@@ -165,8 +159,6 @@ void GatewayServer::forwardToIm(uint64_t conn_id, std::string payload) {
     conn = it->second.conn.lock();
     if (!conn)
       return;
-    pinned_ip = it->second.im_ip;
-    pinned_port = it->second.im_port;
   }
 
   // 注入 header：网关身份 + 连接定位 + 客户端真实 IP + 本网关回推地址
@@ -226,32 +218,22 @@ void GatewayServer::forwardToIm(uint64_t conn_id, std::string payload) {
     signAndInject(req, id);
   }
 
-  // 故障转移重试：首次用 pin 节点，传输层失败时对白名单方法换节点重试
+  // 故障转移重试：每消息选一个未尝试过的 IM 节点（无 pin，任意节点可服务），
+  // 传输层失败时对白名单方法换节点重试。
   std::unordered_set<std::string> tried;
   std::string resp_body;
   int32_t err = 0;
   bool ok = false;
-  std::string final_ip = pinned_ip;
-  uint16_t final_port = pinned_port;
 
   for (int attempt = 0; attempt <= kForwardMaxRetries; ++attempt) {
-    std::string ip = final_ip;
-    uint16_t port = final_port;
-    // pin 为空（首帧）或已失败，则选一个未尝试过的节点
-    if (ip.empty() || tried.count(ip + ":" + std::to_string(port))) {
-      auto node = im_client_.pickNodeExcept(tried);
-      if (!node.has_value())
-        break;
-      ip = node->ip;
-      port = node->port;
-    }
-    std::string addr = ip + ":" + std::to_string(port);
+    auto node = im_client_.pickNodeExcept(tried);
+    if (!node.has_value())
+      break;
+    std::string addr = node->ip + ":" + std::to_string(node->port);
     tried.insert(addr);
 
-    ok = getImChannel(ip, port)->CallMessage(req, resp_body, err);
+    ok = getImChannel(node->ip, node->port)->CallMessage(req, resp_body, err);
     if (ok) {
-      final_ip = ip;
-      final_port = port;
       break;
     }
 
@@ -267,13 +249,12 @@ void GatewayServer::forwardToIm(uint64_t conn_id, std::string payload) {
         std::chrono::milliseconds(kRetryBackoffMs * (attempt + 1)));
   }
 
-  // 成功且最终节点与 pin 不一致（含原本未 pin）时更新 pin
-  if (ok && (final_ip != pinned_ip || final_port != pinned_port)) {
+  // 绑定方法（Connect/Login）成功则标记已注册路由（断线清理用）
+  if (ok && (method == "Connect" || method == "Login")) {
     std::lock_guard<std::mutex> lk(mutex_);
     auto it = conns_.find(conn_id);
     if (it != conns_.end()) {
-      it->second.im_ip = final_ip;
-      it->second.im_port = final_port;
+      it->second.bound = true;
     }
   }
 
@@ -336,16 +317,14 @@ std::shared_ptr<RpcChannel> GatewayServer::getImChannel(const std::string &ip,
                                   kForwardTimeoutMs);
 }
 
-void GatewayServer::notifyDisconnect(uint64_t conn_id, const std::string &im_ip,
-                                     uint16_t im_port) {
+void GatewayServer::notifyDisconnect(uint64_t conn_id) {
   im::ClientDisconnectRequest req;
   req.set_gateway_id(gateway_id_);
   req.set_conn_id(conn_id);
-  auto ch = getImChannel(im_ip, im_port);
+  // 轮询到任意 IM 节点：路由清理靠 RouteServer 反查索引，节点无关
   std::string resp_body;
   int32_t err = 0;
-  ch->Call("ImService", "ClientDisconnect", req.SerializeAsString(), resp_body,
-           err);
+  im_client_.Call("ClientDisconnect", req.SerializeAsString(), resp_body, err);
 }
 
 std::string GatewayServer::handlePush(spConnection conn,
@@ -370,9 +349,12 @@ std::string GatewayServer::handlePush(spConnection conn,
     return resp.SerializeAsString();
   }
   // frame 已是 IM 节点打包好的 [4字节LE长度][ServerPushEnvelope]，直写
-  target->send(req.frame().data(), req.frame().size());
   if (req.force_close()) {
-    target->forceClose();
+    // 刷完帧再关：send + forceClose 都是异步入队，closecallback 会先于
+    // writecallback 执行导致帧被丢弃，必须用 sendThenClose 保证先写出再关。
+    target->sendThenClose(req.frame().data(), req.frame().size());
+  } else {
+    target->send(req.frame().data(), req.frame().size());
   }
   resp.set_success(true);
   return resp.SerializeAsString();

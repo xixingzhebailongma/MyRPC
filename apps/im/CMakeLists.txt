@@ -115,7 +115,6 @@ target_link_libraries(message_store
 add_executable(im_server
     services/im/im_server.cc
     services/im/im_server_main.cc
-    services/im/user_manager.cc
     services/im/route_cache.cc
 )
 target_include_directories(im_server PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/services/im)
@@ -154,7 +153,6 @@ target_link_libraries(auth_server auth)
 add_executable(deliver_server
     services/deliver/deliver_server.cc
     services/deliver/deliver_server_main.cc
-    services/im/route_cache.cc
 )
 target_include_directories(deliver_server PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/services/deliver)
 target_link_libraries(deliver_server

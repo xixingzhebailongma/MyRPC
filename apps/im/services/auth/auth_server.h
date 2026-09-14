@@ -1,6 +1,5 @@
 #pragma once
 
-#include "stream_subscriber.h"
 #include "rpc_server.h"
 #include "session_store.h"
 #include "user_dao.h" // DbConfig 定义在这里
@@ -31,12 +30,10 @@ private:
   std::string handleListSessions(const std::string &request_body);
   std::string handleKickSession(const std::string &request_body);
   std::string handleKickAllSessions(const std::string &request_body);
-  void onUserChanged(const std::string &payload);
 
   RpcServer rpc_server_;
   SessionStore session_store_;
   UserDao user_dao_;
-  StreamSubscriber user_subscriber_; // 订阅 im:user:events 做跨节点吊销（Stream 广播）
 
   // 节点身份，用于构建唯一且跨重启稳定的消费组名
   std::string ip_;

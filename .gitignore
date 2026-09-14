@@ -8,3 +8,21 @@ compile_commands.json
 *.pb.h
 apps/im/certs/
 *.log
+
+# 编辑器 / IDE 临时文件
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# 核心转储
+core
+core.*
+
+# 编译产物兜底（通常已在 build*/ 内，双保险）
+a.out
+*.o
+*.a
+*.so

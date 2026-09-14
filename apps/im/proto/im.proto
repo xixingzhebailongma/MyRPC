@@ -84,7 +84,8 @@ message ServerPushEnvelope{
        string server_ip = 2;   // 拆分后：gateway 的 RPC 监听 IP
        int32  server_port = 3; // 拆分后：gateway 的 RPC 监听 port
        uint64 conn_id = 4;     // 新增：gateway 内的连接 ID
-   } 
+       string session_id = 5;  // 新增：该连接对应的会话（踢人时按它匹配，投递忽略）
+   }
 
  message RouteQueryRequest { string user_id = 1; }
  message RouteQueryResponse {
@@ -98,6 +99,7 @@ message ServerPushEnvelope{
        string server_ip = 3;   // gateway rpc ip
        int32 server_port = 4;  // gateway rpc port
        uint64 conn_id = 5;     // 新增
+       string session_id = 6;  // 新增：连接所属会话
         }
  message RouteRegisterResponse { bool success = 1; }
 
@@ -107,6 +109,13 @@ message RouteUnregisterRequest {
       uint64 conn_id = 3;     // 新增：注销哪个连接
    }
  message RouteUnregisterResponse { bool success =1; }
+
+ // ========== 断线清理（Gateway 只给连接定位，RouteServer 反查 user） ==========
+ message RouteUnregisterByConnRequest {
+       string gateway_id = 1;
+       uint64 conn_id = 2;
+   }
+ message RouteUnregisterByConnResponse { bool success = 1; }
 
  // ========== 路由变更事件（Redis Pub/Sub 推送用） ==========
    message RouteChangeEvent {
@@ -243,22 +252,6 @@ message PendingMessageRecord{
      bool success = 1;
      int32 kicked = 2;   // 实际吊销的会话数
      string message = 3;
- }
-
- // ========== 用户数据变更事件（Redis Pub/Sub 广播用，跨节点） ==========
- message UserChangedEvent {
-     enum Type {
-           PASSWORD_CHANGED = 0;
-           USER_BANNED = 1;
-           USER_DELETED = 2;
-           FRIEND_REMOVED = 3;
-           SESSION_KICKED = 4;      // 单会话被踢，target_id 承载 session_id
-           ALL_SESSIONS_KICKED = 5; // 全部会话被踢（改密码/封禁/删号）
-       }
-     Type type = 1;
-     string user_id = 2;     // 受影响用户
-     string target_id = 3;   // 可选，如被删的好友 id
-     string reason = 4;      // 可选，踢下线原因文案
  }
 
  

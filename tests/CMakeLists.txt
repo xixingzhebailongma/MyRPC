@@ -1,84 +1,87 @@
-add_executable(test_queue test_queue.cc)
+# 共享测试辅助头 test_helpers.h 位于 tests/ 根目录，子目录里的 .cc 靠这个 include 路径引用。
+include_directories(${CMAKE_CURRENT_SOURCE_DIR})
+
+add_executable(test_queue unit/test_queue.cc)
 target_link_libraries(test_queue
     PRIVATE logger
     PRIVATE Threads::Threads
 )
 
-add_executable(test_buffer test_buffer.cc)
+add_executable(test_buffer unit/test_buffer.cc)
 target_link_libraries(test_buffer
     PRIVATE muduo
     PRIVATE protocol
 )
 
-add_executable(test_im_conn_concurrency test_im_conn_concurrency.cc)
+add_executable(test_im_conn_concurrency unit/test_im_conn_concurrency.cc)
 target_link_libraries(test_im_conn_concurrency
     PRIVATE im_client_conn
     PRIVATE Threads::Threads
 )
 
-add_executable(test_eventloop_functor_reentry test_eventloop_functor_reentry.cc)
+add_executable(test_eventloop_functor_reentry unit/test_eventloop_functor_reentry.cc)
 target_link_libraries(test_eventloop_functor_reentry
     PRIVATE muduo
 )
 
-add_executable(test_rpc_channel_frame test_rpc_channel_frame.cc)
+add_executable(test_rpc_channel_frame unit/test_rpc_channel_frame.cc)
 target_link_libraries(test_rpc_channel_frame
     PRIVATE rpc_client
 )
 
-add_executable(test_rpc_channel_concurrency test_rpc_channel_concurrency.cc)
+add_executable(test_rpc_channel_concurrency unit/test_rpc_channel_concurrency.cc)
 target_link_libraries(test_rpc_channel_concurrency
     PRIVATE rpc_client
     PRIVATE Threads::Threads
 )
 
-add_executable(test_rpc_channel_pool_reap test_rpc_channel_pool_reap.cc)
+add_executable(test_rpc_channel_pool_reap unit/test_rpc_channel_pool_reap.cc)
 target_link_libraries(test_rpc_channel_pool_reap
     PRIVATE rpc_client
     PRIVATE Threads::Threads
 )
 
-add_executable(test_threadpool test_threadpool.cc)
+add_executable(test_threadpool unit/test_threadpool.cc)
 target_link_libraries(test_threadpool muduo)
 
-add_executable(test_load_balancer test_load_balancer.cc)
+add_executable(test_load_balancer unit/test_load_balancer.cc)
 target_link_libraries(test_load_balancer PRIVATE load_balancer)
 
-add_executable(test_rpc_channel_circuit_breaker test_rpc_channel_circuit_breaker.cc)
+add_executable(test_rpc_channel_circuit_breaker unit/test_rpc_channel_circuit_breaker.cc)
 target_link_libraries(test_rpc_channel_circuit_breaker
     PRIVATE rpc_client
 )
 
-add_executable(test_rpc_channel_heartbeat test_rpc_channel_heartbeat.cc)
+add_executable(test_rpc_channel_heartbeat unit/test_rpc_channel_heartbeat.cc)
 target_link_libraries(test_rpc_channel_heartbeat
     PRIVATE rpc_client
     PRIVATE Threads::Threads
 )
 
-add_executable(test_rpc_channel_metrics test_rpc_channel_metrics.cc)
+add_executable(test_rpc_channel_metrics unit/test_rpc_channel_metrics.cc)
 target_link_libraries(test_rpc_channel_metrics
     PRIVATE rpc_client
     PRIVATE Threads::Threads
 )
 
-add_executable(test_idempotency_lru test_idempotency_lru.cc)
+add_executable(test_idempotency_lru unit/test_idempotency_lru.cc)
 target_link_libraries(test_idempotency_lru
     PRIVATE rpc_server
     PRIVATE Threads::Threads
 )
-add_executable(test_idempotency_redis test_idempotency_redis.cc)
+add_executable(test_idempotency_redis unit/test_idempotency_redis.cc)
 target_link_libraries(test_idempotency_redis
     PRIVATE idempotency_redis
     PRIVATE Threads::Threads
 )
-add_executable(test_async_rpc_client test_async_rpc_client.cc)
+add_executable(test_async_rpc_client unit/test_async_rpc_client.cc)
 target_link_libraries(test_async_rpc_client
     PRIVATE rpc_async_client
     PRIVATE protocol
     PRIVATE Threads::Threads
 )
 
-add_executable(test_async_lb_rpc_client test_async_lb_rpc_client.cc)
+add_executable(test_async_lb_rpc_client unit/test_async_lb_rpc_client.cc)
 target_link_libraries(test_async_lb_rpc_client
     PRIVATE async_lb_rpc_client
     PRIVATE rpc_server
@@ -86,28 +89,28 @@ target_link_libraries(test_async_lb_rpc_client
 )
 
 # ---- 框架端到端集成测试（无外部依赖）----
-add_executable(test_rpc_server_e2e test_rpc_server_e2e.cc)
+add_executable(test_rpc_server_e2e unit/test_rpc_server_e2e.cc)
 target_link_libraries(test_rpc_server_e2e
     PRIVATE rpc_server
     PRIVATE rpc_client
     PRIVATE Threads::Threads
 )
 
-add_executable(test_rpc_server_concurrency test_rpc_server_concurrency.cc)
+add_executable(test_rpc_server_concurrency unit/test_rpc_server_concurrency.cc)
 target_link_libraries(test_rpc_server_concurrency
     PRIVATE rpc_server
     PRIVATE rpc_client
     PRIVATE Threads::Threads
 )
 
-add_executable(test_rpc_server_idempotency test_rpc_server_idempotency.cc)
+add_executable(test_rpc_server_idempotency unit/test_rpc_server_idempotency.cc)
 target_link_libraries(test_rpc_server_idempotency
     PRIVATE rpc_server
     PRIVATE rpc_client
     PRIVATE Threads::Threads
 )
 
-add_executable(test_rpc_lb_failover_etcd test_rpc_lb_failover_etcd.cc)
+add_executable(test_rpc_lb_failover_etcd unit/test_rpc_lb_failover_etcd.cc)
 target_link_libraries(test_rpc_lb_failover_etcd
     PRIVATE rpc_server
     PRIVATE lb_rpc_client
@@ -115,7 +118,7 @@ target_link_libraries(test_rpc_lb_failover_etcd
 )
 
 # ---- TLS 握手端到端：spawn gateway_server（客户端侧 TLS） + ImClientConn ----
-add_executable(test_gateway_tls test_gateway_tls.cc)
+add_executable(test_gateway_tls unit/test_gateway_tls.cc)
 target_include_directories(test_gateway_tls PRIVATE ${CMAKE_SOURCE_DIR}/apps/im/client)
 target_link_libraries(test_gateway_tls
     PRIVATE im_client_conn
@@ -151,7 +154,7 @@ add_test(NAME test_rpc_lb_failover_etcd COMMAND test_rpc_lb_failover_etcd)
 add_test(NAME test_gateway_tls COMMAND test_gateway_tls)
 
 # ---- IM 全链路 E2E：spawn route/auth/im/gateway/deliver + ImClientConn ----
-add_executable(test_im_e2e test_im_e2e.cc)
+add_executable(test_im_e2e business/test_im_e2e.cc)
 target_link_libraries(test_im_e2e
     PRIVATE im_client_conn
     PRIVATE im_proto
@@ -168,3 +171,49 @@ target_compile_definitions(test_im_e2e PRIVATE
     GATEWAY_SERVER_BIN="$<TARGET_FILE:gateway_server>"
     DELIVER_SERVER_BIN="$<TARGET_FILE:deliver_server>")
 add_test(NAME test_im_e2e COMMAND test_im_e2e)
+
+# ---- IM 业务级完整测试：多端会话/账号生命周期/好友/消息可靠性/安全边界 ----
+add_executable(test_im_business business/test_im_business.cc)
+target_link_libraries(test_im_business
+    PRIVATE im_client_conn
+    PRIVATE im_proto
+    PRIVATE registry
+    PRIVATE protobuf::libprotobuf
+    PRIVATE Threads::Threads
+)
+add_dependencies(test_im_business route_server auth_server im_server gateway_server deliver_server)
+target_compile_definitions(test_im_business PRIVATE
+    ROUTE_SERVER_BIN="$<TARGET_FILE:route_server>"
+    AUTH_SERVER_BIN="$<TARGET_FILE:auth_server>"
+    IM_SERVER_BIN="$<TARGET_FILE:im_server>"
+    GATEWAY_SERVER_BIN="$<TARGET_FILE:gateway_server>"
+    DELIVER_SERVER_BIN="$<TARGET_FILE:deliver_server>")
+add_test(NAME test_im_business COMMAND test_im_business)
+
+# ---- IM 多节点一致性 E2E：2 个 IM 节点 + 共享 Redis 路由 + 去 pin 轮询 ----
+add_executable(test_im_multi_node multi-node/test_im_multi_node.cc)
+target_link_libraries(test_im_multi_node
+    PRIVATE im_client_conn
+    PRIVATE im_proto
+    PRIVATE redis
+    PRIVATE registry
+    PRIVATE protobuf::libprotobuf
+    PRIVATE Threads::Threads
+)
+add_dependencies(test_im_multi_node route_server auth_server im_server gateway_server deliver_server)
+target_compile_definitions(test_im_multi_node PRIVATE
+    ROUTE_SERVER_BIN="$<TARGET_FILE:route_server>"
+    AUTH_SERVER_BIN="$<TARGET_FILE:auth_server>"
+    IM_SERVER_BIN="$<TARGET_FILE:im_server>"
+    GATEWAY_SERVER_BIN="$<TARGET_FILE:gateway_server>"
+    DELIVER_SERVER_BIN="$<TARGET_FILE:deliver_server>")
+add_test(NAME test_im_multi_node COMMAND test_im_multi_node)
+
+# 三个 IM E2E 测试共用固定服务名 "ImService"（各自 fork 服务进程），并行会互抢
+# etcd 同名节点导致互相等待/串扰，故三者串行运行（RUN_SERIAL 只限制彼此，不影响
+# 与其它无外部依赖的框架测试并行）。
+set_tests_properties(test_im_e2e test_im_business test_im_multi_node
+    PROPERTIES RUN_SERIAL TRUE)
+
+# 压测基准（不注册为 CTest，手动运行）。
+add_subdirectory(bench)

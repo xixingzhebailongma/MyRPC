@@ -61,14 +61,6 @@ bool MessageStore::connect(const std::string &redis_ip, int redis_port) {
   return ok;
 }
 
-bool MessageStore::publishEvent(const std::string &payload) {
-  // 广播 Stream（替代 Pub/Sub）：MAXLEN 近似裁剪，防无限增长；失败返回空串
-  return !redis_
-               .xaddTrimmed(immq::kUserEventsStream, immq::kBodyField, payload,
-                            immq::kEventsMaxLen)
-               .empty();
-}
-
 //========== 去重 ==========
 
 MessageStore::ClaimResult MessageStore::tryClaimRequest(

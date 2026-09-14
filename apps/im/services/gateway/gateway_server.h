@@ -43,9 +43,8 @@ private:
 
   struct ConnState {
     std::weak_ptr<Connection> conn; // weak：避免与 TcpServer 的强引用冲突
-    std::string im_ip; // 固定到的 IM 节点（空 = 尚未固定）
-    uint16_t im_port = 0;
     bool authenticated = false; // 是否已通过 ticket 完成身份绑定
+    bool bound = false;         // 是否已注册路由（Connect/Login 成功转发后置真）
     Identity identity;          // 绑定后的身份（Gateway 注入用）
   };
 
@@ -56,8 +55,7 @@ private:
   void forwardToIm(uint64_t conn_id, std::string payload);
   bool isRetryableMethod(const std::string &method) const;
   bool isPreAuthMethod(const std::string &method) const;
-  void notifyDisconnect(uint64_t conn_id, const std::string &im_ip,
-                        uint16_t im_port);
+  void notifyDisconnect(uint64_t conn_id);
   std::shared_ptr<RpcChannel> getImChannel(const std::string &ip,
                                            uint16_t port);
 

@@ -25,6 +25,8 @@ private:
                                const std::string &request_body);
   std::string handleRouteUnregister(spConnection conn,
                                     const std::string &request_body);
+  std::string handleRouteUnregisterByConn(spConnection conn,
+                                          const std::string &request_body);
 
   RpcServer rpc_server_;
   RedisClient redis_;

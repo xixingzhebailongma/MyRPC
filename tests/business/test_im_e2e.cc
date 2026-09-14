@@ -247,7 +247,7 @@ pid_t startService(const std::string &bin, const std::vector<std::string> &args,
 // 等待 "ImService" 在 etcd 里稳定为恰好 1 个节点且地址 == myAddr。
 // 处理「残留的其它 IM 节点 lease 未过期」导致的串扰：等到旧 key 过期消失。
 bool waitForImService(const std::string &etcd, const std::string &myAddr,
-                      int timeout_ms = 40000) {
+                      int timeout_ms = 60000) {
   ServiceDiscovery sd(etcd);
   auto deadline = std::chrono::steady_clock::now() +
                   std::chrono::milliseconds(timeout_ms);
