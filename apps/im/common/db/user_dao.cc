@@ -166,13 +166,6 @@ std::vector<std::string> UserDao::getFriendList(const std::string &user_id) {
   return friends;
 }
 
-// ==================== publishUserEvent ====================
-void UserDao::publishUserEvent(UserChangedEvent ev) {
-  if (publisher_) {
-    publisher_(ev);
-  }
-}
-
 // ==================== updatePassword ====================
 bool UserDao::updatePassword(const std::string &user_id,
                              const std::string &new_password,
@@ -199,8 +192,6 @@ bool UserDao::updatePassword(const std::string &user_id,
         *err = "user not found";
       return false;
     }
-    publishUserEvent(UserChangedEvent{UserEventType::PasswordChanged, user_id,
-                                      "", "password changed"});
     return true;
   } catch (sql::SQLException &e) {
     LOG_ERROR("UserDao::updatePassword failed: %s (errno=%d)", e.what(),
@@ -232,8 +223,6 @@ bool UserDao::deleteFriend(const std::string &user_id,
     pstmt->setString(3, friend_id);
     pstmt->setString(4, user_id);
     pstmt->executeUpdate();
-    publishUserEvent(UserChangedEvent{UserEventType::FriendRemoved, user_id,
-                                      friend_id, "friend removed"});
     return true;
   } catch (sql::SQLException &e) {
     LOG_ERROR("UserDao::deleteFriend failed: %s (errno=%d)", e.what(),
@@ -274,8 +263,6 @@ bool UserDao::deleteUser(const std::string &user_id, std::string *err) {
         *err = "user not found";
       return false;
     }
-    publishUserEvent(UserChangedEvent{UserEventType::UserDeleted, user_id, "",
-                                      "user deleted"});
     return true;
   } catch (sql::SQLException &e) {
     LOG_ERROR("UserDao::deleteUser failed: %s (errno=%d)", e.what(),
@@ -309,10 +296,6 @@ bool UserDao::updateUserStatus(const std::string &user_id, int status,
       if (err)
         *err = "user not found";
       return false;
-    }
-    if (status != 0) {
-      publishUserEvent(UserChangedEvent{UserEventType::UserBanned, user_id, "",
-                                        "user banned"});
     }
     return true;
   } catch (sql::SQLException &e) {

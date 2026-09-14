@@ -442,6 +442,12 @@ int main(int argc, char **argv) {
       std::cout << "connect failed\n";
       return 1;
     }
+    std::string err;
+    if (!bindViaTicket(c, at, &err)) {
+      std::cout << "bind failed: " << err << "\n";
+      c.close();
+      return 1;
+    }
     LogoutRequest r;
     r.set_access_token(at);
     LogoutResponse resp;

@@ -76,31 +76,6 @@ ImServer::ImServer(const std::string &ip, int port,
   if (!nonce_redis_.connect(redis_ip_, redis_port_)) {
     throw std::runtime_error("Failed to connect Redis (nonce store)");
   }
-  // 注入事件发布器：DAO 写库成功后 -> 序列化为 proto -> Redis Pub/Sub
-  // 广播
-  user_dao_.setPublisher([this](const ::UserChangedEvent &ev) {
-    im::UserChangedEvent pev;
-    switch (ev.type) {
-    case UserEventType::PasswordChanged:
-      pev.set_type(im::UserChangedEvent::PASSWORD_CHANGED);
-      break;
-    case UserEventType::UserBanned:
-      pev.set_type(im::UserChangedEvent::USER_BANNED);
-      break;
-    case UserEventType::UserDeleted:
-      pev.set_type(im::UserChangedEvent::USER_DELETED);
-      break;
-    case UserEventType::FriendRemoved:
-      pev.set_type(im::UserChangedEvent::FRIEND_REMOVED);
-      break;
-    }
-    pev.set_user_id(ev.user_id);
-    pev.set_target_id(ev.target_id);
-    pev.set_reason(ev.reason);
-    std::string payload;
-    pev.SerializeToString(&payload);
-    message_store_.publishEvent(payload);
-  });
   //注册ACK确认&离线消息拉取（注意：proto类型是typo版PullOfflien...)
   // 两参 handler 一律用 lambda 而非 std::bind：bind
   // 表达式可吞掉多余实参，会同时匹配 conn-aware 和 with-context
@@ -163,15 +138,6 @@ ImServer::ImServer(const std::string &ip, int port,
       [this](spConnection conn, const std::string &body) {
         return handleClientDisconnect(conn, body);
       });
-  // ===== 周期任务样板：每 30 秒统计在线用户数 =====
-  // ① setPeriodTimer 的回调在 mainloop（主线程 = accept
-  // 循环）里执行，必须轻量：
-  //    这里只"发令"，立刻返回，绝不在回调里做重活。
-  // ② 真正的统计（加锁、遍历容器）丢给 submitTask → workPool_ 工作线程。
-  rpc_server_.setPeriodTimer(30.0, [this](EventLoop *loop) {
-    (void)loop; // 用不到 loop 指针，显式忽略，避免编译告警
-    rpc_server_.submitTask([this]() { reportOnlineStats(); });
-  });
   // 注册到 etcd：所有 IM 节点共享 "ImService" 服务名，供 Gateway 发现
   rpc_server_.enableRegistry(etcd_endpoints, "ImService", ip_, port_);
   // 连接断开 / 握手超时由 Gateway 负责，通过 ClientDisconnect 通知本节点清理。
@@ -180,11 +146,6 @@ ImServer::ImServer(const std::string &ip, int port,
       redis_ip_, redis_port_, immq::kRouteEventsStream,
       "im:route:events:im:" + ip_ + ":" + std::to_string(port_),
       [this](const std::string &payload) { this->onRouteChange(payload); });
-  // 订阅用户数据变更事件：跨节点踢下线（Stream 广播，断线不丢）
-  user_subscriber_.start(
-      redis_ip_, redis_port_, immq::kUserEventsStream,
-      "im:user:events:im:" + ip_ + ":" + std::to_string(port_),
-      [this](const std::string &payload) { this->onUserChanged(payload); });
 }
 
 void ImServer::start() { rpc_server_.start(); }
@@ -192,7 +153,6 @@ void ImServer::start() { rpc_server_.start(); }
 void ImServer::stop() {
 
   route_subscriber_.stop();
-  user_subscriber_.stop();
   rpc_server_.stop();
 }
 
@@ -239,16 +199,14 @@ std::string ImServer::handleLogin(spConnection conn,
   resp.set_expires_in(aresp.expires_in());
   session_id = aresp.session().session_id();
 
-  // 2. 本地记录上线（多端会话）：连接引用 = 客户端所在的 Gateway 连接
+  // 2. 连接引用 = 客户端所在的 Gateway 连接（无状态，仅用于注册路由）
   ClientConnRef ref;
   ref.gateway_id = hdr.gateway_id();
   ref.conn_id = hdr.conn_id();
   ref.gateway_rpc_ip = hdr.gateway_rpc_ip();
   ref.gateway_rpc_port = hdr.gateway_rpc_port();
-  user_manager_.userOnline(session_id, user_id, req.username(), req.device_id(),
-                           req.device_type(), ref);
   // 3. 向 Route Server 注册路由
-  bool ok = registerUserOnline(user_id, ref);
+  bool ok = registerUserOnline(user_id, ref, session_id);
 
   // 4. 用户上线后投递离线消息
   auto offline_msgs = message_store_.fetchOfflineMessages(user_id);
@@ -347,6 +305,17 @@ std::string ImServer::handleChangePassword(spConnection conn,
   std::string uid = hdr.identity().user_id();
   std::string err;
   bool ok = user_dao_.updatePassword(uid, req.new_password(), &err);
+  if (ok) {
+    // 改密成功后：吊销该用户全部会话（旧 token 失效）+ 踢下线。
+    // 直连两步替代旧广播链：Auth 吊销会话 + 本节点踢连接。
+    auth::KickAllSessionsRequest areq;
+    areq.set_user_id(uid);
+    std::string aresp_body;
+    int32_t aerr = 0;
+    auth_client_.Call("KickAllSessions", areq.SerializeAsString(), aresp_body,
+                      aerr);
+    kickUserOffline(uid, "密码已修改，请重新登录");
+  }
   resp.set_success(ok);
   resp.set_message(ok ? "password changed" : err);
   std::string out;
@@ -469,7 +438,9 @@ std::string ImServer::handleGetFriendList(spConnection conn,
     auto *info = resp.add_friends();
     info->set_user_id(fid);
     info->set_username(fid);
-    info->set_is_online(user_manager_.isOnline(fid));
+    // 在线语义改为「连接在线」：Route 表里有该 user 的 field 即在线，
+    // 不再依赖本地 UserManager（跨节点好友之前会误判离线）。
+    info->set_is_online(!resolveRoutes(fid).empty());
   }
   std::string out;
   resp.SerializeToString(&out);
@@ -620,13 +591,15 @@ std::vector<RouteServer> ImServer::resolveRoutes(const std::string &user_id) {
   return servers;
 }
 bool ImServer::registerUserOnline(const std::string &user_id,
-                                  const ClientConnRef &ref) {
+                                  const ClientConnRef &ref,
+                                  const std::string &session_id) {
   im::RouteRegisterRequest req;
   req.set_user_id(user_id);
   req.set_server_id(ref.gateway_id); // 现在注册的是 Gateway 位置
   req.set_server_ip(ref.gateway_rpc_ip);
   req.set_server_port(ref.gateway_rpc_port);
   req.set_conn_id(ref.conn_id);
+  req.set_session_id(session_id);
   std::string req_body;
   req.SerializeToString(&req_body);
 
@@ -634,19 +607,18 @@ bool ImServer::registerUserOnline(const std::string &user_id,
   int32_t err = 0;
   return route_client_.Call("RouteRegister", req_body, resp_body, err, user_id);
 }
-bool ImServer::unregisterUserFromRoute(const std::string &user_id,
-                                       const ClientConnRef &ref) {
-  im::RouteUnregisterRequest req;
-  req.set_user_id(user_id);
-  req.set_server_id(ref.gateway_id); // 只注销这条连接对应的路由
-  req.set_conn_id(ref.conn_id);
+bool ImServer::unregisterUserFromRouteByConn(const std::string &gateway_id,
+                                             uint64_t conn_id) {
+  im::RouteUnregisterByConnRequest req;
+  req.set_gateway_id(gateway_id);
+  req.set_conn_id(conn_id);
   std::string req_body;
   req.SerializeToString(&req_body);
 
   std::string resp_body;
   int32_t err = 0;
-  return route_client_.Call("RouteUnregister", req_body, resp_body, err,
-                            user_id);
+  // 无 user_id 可用，按连接定位反查，节点无关
+  return route_client_.Call("RouteUnregisterByConn", req_body, resp_body, err);
 }
 void ImServer::onRouteChange(const std::string &payload) {
   im::RouteChangeEvent ev;
@@ -661,83 +633,57 @@ void ImServer::onRouteChange(const std::string &payload) {
   }
 }
 
-void ImServer::onUserChanged(const std::string &payload) {
-  im::UserChangedEvent ev;
-  if (!ev.ParseFromString(payload)) {
-    return;
-  }
-  // 不阻塞订阅线程：把踢下线逻辑投递到工作池异步执行，立即返回继续收下一条事件
-  rpc_server_.submitTask([this, ev = std::move(ev)]() { kickOffline(ev); });
-}
-
-void ImServer::publishUserEvent(im::UserChangedEvent::Type type,
-                                const std::string &user_id,
-                                const std::string &target_id) {
-  im::UserChangedEvent ev;
-  ev.set_type(type);
-  ev.set_user_id(user_id);
-  ev.set_target_id(target_id);
-  std::string payload;
-  ev.SerializeToString(&payload);
-  message_store_.publishEvent(payload);
-}
-
-void ImServer::kickOffline(const im::UserChangedEvent &ev) {
-  if (!user_manager_.isOnline(ev.user_id())) {
-    return; // 不在本节点，忽略（其他节点会各自处理）
-  }
-  LOG_INFO("kick user offline: %s type=%d", ev.user_id().c_str(), ev.type());
-
-  // 1. 发一条系统通知，客户端收到后提示重新登录
-  im::SystemNotice notice;
-  switch (ev.type()) {
-  case im::UserChangedEvent::PASSWORD_CHANGED:
-    notice.set_message("密码已修改，请重新登录");
-    break;
-  case im::UserChangedEvent::USER_BANNED:
-    notice.set_message("账号已被封禁");
-    break;
-  case im::UserChangedEvent::USER_DELETED:
-    notice.set_message("账号已被删除");
-    break;
-  case im::UserChangedEvent::FRIEND_REMOVED:
-    notice.set_message("好友关系已变更");
-    break;
-  case im::UserChangedEvent::SESSION_KICKED:
-    notice.set_message("该设备已被踢下线");
-    break;
-  case im::UserChangedEvent::ALL_SESSIONS_KICKED:
-    notice.set_message("账号已从所有设备下线，请重新登录");
-    break;
-  default:
-    notice.set_message("账号状态已变更，请重新登录");
-    break;
-  }
-  im::ServerPushEnvelope envelope;
-  envelope.set_type(im::ServerPushEnvelope::SYSTEM_NOTICE);
-  notice.SerializeToString(envelope.mutable_payload());
-  std::string frame = packFrame(envelope);
-
-  // 单会话踢：只断 target_id(session_id) 对应的那一条连接
-  if (ev.type() == im::UserChangedEvent::SESSION_KICKED) {
-    ClientConnRef conn;
-    if (!user_manager_.getConnectionBySession(ev.target_id(), &conn)) {
-      return; // 该会话不在本节点，其它节点各自处理
+// 踢某用户全部在线连接（直连，不再广播）：resolveRoutes → 逐连接 push(force_close) + 注销路由
+// 异步执行：避免在 handler 里同步 force_close 当前连接，导致响应来不及回传。
+void ImServer::kickUserOffline(const std::string &uid,
+                               const std::string &notice_text) {
+  rpc_server_.submitTask([this, uid, notice_text]() {
+    im::ServerPushEnvelope envelope;
+    envelope.set_type(im::ServerPushEnvelope::SYSTEM_NOTICE);
+    im::SystemNotice notice;
+    notice.set_message(notice_text);
+    notice.SerializeToString(envelope.mutable_payload());
+    std::string frame = packFrame(envelope);
+    for (const auto &s : resolveRoutes(uid)) {
+      pushToGateway(s, frame, /*force_close=*/true);
+      unregisterRoute(uid, s);
     }
-    RouteServer s;
-    s.set_server_id(conn.gateway_id);
-    s.set_server_ip(conn.gateway_rpc_ip);
-    s.set_server_port(conn.gateway_rpc_port);
-    s.set_conn_id(conn.conn_id);
-    pushToGateway(s, frame, /*force_close=*/true);
-    return;
-  }
+  });
+}
 
-  // 多端：每个在线设备都推一条系统通知，然后让 Gateway 关闭该连接
-  std::vector<RouteServer> servers = resolveRoutes(ev.user_id());
-  for (const auto &s : servers) {
-    pushToGateway(s, frame, /*force_close=*/true);
-  }
+// 单会话踢：按 session_id 匹配要踢的那条连接（同样异步）
+void ImServer::kickSessionOffline(const std::string &uid,
+                                  const std::string &session_id,
+                                  const std::string &notice_text) {
+  rpc_server_.submitTask([this, uid, session_id, notice_text]() {
+    im::ServerPushEnvelope envelope;
+    envelope.set_type(im::ServerPushEnvelope::SYSTEM_NOTICE);
+    im::SystemNotice notice;
+    notice.set_message(notice_text);
+    notice.SerializeToString(envelope.mutable_payload());
+    std::string frame = packFrame(envelope);
+    for (const auto &s : resolveRoutes(uid)) {
+      if (s.session_id() == session_id) {
+        pushToGateway(s, frame, /*force_close=*/true);
+        unregisterRoute(uid, s);
+      }
+    }
+  });
+}
+
+// 注销某连接的路由（RouteServer 版，直连踢人用）
+bool ImServer::unregisterRoute(const std::string &user_id,
+                               const RouteServer &server) {
+  im::RouteUnregisterRequest req;
+  req.set_user_id(user_id);
+  req.set_server_id(server.server_id()); // gateway_id
+  req.set_conn_id(server.conn_id());
+  std::string req_body;
+  req.SerializeToString(&req_body);
+  std::string resp_body;
+  int32_t err = 0;
+  return route_client_.Call("RouteUnregister", req_body, resp_body, err,
+                            user_id);
 }
 
 std::string ImServer::packFrame(const google::protobuf::Message &msg) {
@@ -748,15 +694,6 @@ std::string ImServer::packFrame(const google::protobuf::Message &msg) {
   frame.append(reinterpret_cast<const char *>(&len), 4);
   frame.append(body);
   return frame;
-}
-
-void ImServer::reportOnlineStats() {
-  // 本函数跑在 workPool_ 工作线程里，可以安全地加锁、遍历，
-  // 甚至做阻塞 IO（Redis/MySQL 查询），都不会拖慢 mainloop 的 accept。
-  size_t users = user_manager_.onlineUserCount();
-  size_t sessions = user_manager_.sessionCount();
-  LOG_INFO("IM[%s] online: %zu users / %zu sessions", server_id_.c_str(), users,
-           sessions);
 }
 
 bool ImServer::verifyIdentity(const RpcHeader &hdr, std::string *err) {
@@ -811,15 +748,13 @@ std::string ImServer::handleConnect(spConnection conn,
     return resp.SerializeAsString();
   }
   const Identity &id = hdr.identity();
-  // 绑定会话：连接引用 = 客户端所在的 Gateway 连接
+  // 连接引用 = 客户端所在的 Gateway 连接（无状态，仅用于注册路由）
   ClientConnRef ref;
   ref.gateway_id = hdr.gateway_id();
   ref.conn_id = hdr.conn_id();
   ref.gateway_rpc_ip = hdr.gateway_rpc_ip();
   ref.gateway_rpc_port = hdr.gateway_rpc_port();
-  user_manager_.userOnline(id.session_id(), id.user_id(), id.username(),
-                           id.device_id(), id.device_type(), ref);
-  bool ok = registerUserOnline(id.user_id(), ref);
+  bool ok = registerUserOnline(id.user_id(), ref, id.session_id());
 
   // 投递离线消息
   auto offline = message_store_.fetchOfflineMessages(id.user_id());
@@ -922,19 +857,8 @@ std::string ImServer::handleLogout(spConnection conn,
   // 登出幂等：AuthServer 侧找不到 token 也返回成功
   auth_client_.Call("Logout", areq.SerializeAsString(), resp_body, err);
 
-  // 本地解绑：这条连接从此不再是已认证状态，后续请求会被当作未认证拒绝。
-  // 不主动 forceClose —— 让框架正常发回响应，连接留着但已无身份。
-  std::string uid;
-  std::string conn_key = hdr.gateway_id() + ":" + std::to_string(hdr.conn_id());
-  bool was_last = user_manager_.userOfflineByConn(conn_key, &uid);
-  if (was_last && !uid.empty()) {
-    ClientConnRef ref;
-    ref.gateway_id = hdr.gateway_id();
-    ref.conn_id = hdr.conn_id();
-    ref.gateway_rpc_ip = hdr.gateway_rpc_ip();
-    ref.gateway_rpc_port = hdr.gateway_rpc_port();
-    unregisterUserFromRoute(uid, ref);
-  }
+  // 直接注销这条连接的路由（反查索引，节点无关）
+  unregisterUserFromRouteByConn(hdr.gateway_id(), hdr.conn_id());
   resp.set_success(true);
   return resp.SerializeAsString();
 }
@@ -1029,10 +953,9 @@ std::string ImServer::handleKickSession(spConnection conn,
   }
   resp.set_success(aresp.success());
   resp.set_message(aresp.message());
-  // 凭据吊销成功后才广播断连接事件
+  // 凭据吊销成功后才直连踢该会话
   if (aresp.success()) {
-    publishUserEvent(im::UserChangedEvent::SESSION_KICKED, uid,
-                     req.session_id());
+    kickSessionOffline(uid, req.session_id(), "该设备已被踢下线");
   }
   return resp.SerializeAsString();
 }
@@ -1076,12 +999,12 @@ std::string ImServer::handleKickAllSessions(spConnection conn,
   resp.set_kicked(aresp.kicked());
   resp.set_message(aresp.message());
   if (aresp.success()) {
-    publishUserEvent(im::UserChangedEvent::ALL_SESSIONS_KICKED, uid);
+    kickUserOffline(uid, "账号已从所有设备下线，请重新登录");
   }
   return resp.SerializeAsString();
 }
 
-// Gateway -> IM：客户端连接断开，通知本节点清理会话 + 注销路由
+// Gateway -> IM：客户端连接断开，注销路由（走 RouteServer 反查索引，节点无关）。
 std::string ImServer::handleClientDisconnect(spConnection conn,
                                              const std::string &request_body) {
   (void)conn;
@@ -1091,16 +1014,8 @@ std::string ImServer::handleClientDisconnect(spConnection conn,
     resp.set_success(false);
     return resp.SerializeAsString();
   }
-  std::string conn_key = req.gateway_id() + ":" + std::to_string(req.conn_id());
-  std::string uid;
-  bool was_last = user_manager_.userOfflineByConn(conn_key, &uid);
-  if (was_last && !uid.empty()) {
-    ClientConnRef ref;
-    ref.gateway_id = req.gateway_id();
-    ref.conn_id = req.conn_id();
-    // 注销路由只需 gateway_id + conn_id，rpc_ip/port 留空即可
-    unregisterUserFromRoute(uid, ref);
-  }
+  // 路由清理：按 (gateway_id, conn_id) 反查 user 后删除，任意节点可处理
+  unregisterUserFromRouteByConn(req.gateway_id(), req.conn_id());
   resp.set_success(true);
   return resp.SerializeAsString();
 }

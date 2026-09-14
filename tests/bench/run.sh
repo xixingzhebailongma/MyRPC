@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# bench/run_bench.sh — 一键编译并运行 AsyncRpcClient 压测 + 相关功能回归。
+# tests/bench/run.sh — 一键编译并运行 AsyncRpcClient 压测 + 相关功能回归。
 #
 # 用法：
-#   ./bench/run_bench.sh                  # 默认：Release 构建 + 3 档压测 + 功能回归
-#   DURATION=5 ./bench/run_bench.sh       # 自定义每档压测时长（秒）
-#   RUN_CTEST=0 ./bench/run_bench.sh      # 只跑压测，跳过功能回归
+#   ./tests/bench/run.sh                  # 默认：Release 构建 + 3 档压测 + 功能回归
+#   DURATION=5 ./tests/bench/run.sh       # 自定义每档压测时长（秒）
+#   RUN_CTEST=0 ./tests/bench/run.sh      # 只跑压测，跳过功能回归
 #
 # 可用环境变量：
 #   BUILD_DIR    构建目录（默认 build-bench，独立于日常 Debug 的 build/）
@@ -14,7 +14,7 @@
 
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT"
 
 BUILD_DIR="${BUILD_DIR:-build-bench}"
@@ -34,7 +34,7 @@ fi
 echo "==> 编译 bench_async_rpc"
 cmake --build "$BUILD_DIR" --target bench_async_rpc -j"$JOBS"
 
-BIN="$BUILD_DIR/bench/bench_async_rpc"
+BIN="$BUILD_DIR/tests/bench/bench_async_rpc"
 
 # 2) 三档压测（与 bench/README.md 实测配置一致）
 run_bench() { # label servers concurrency threads payload

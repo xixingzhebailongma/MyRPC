@@ -11,7 +11,6 @@
 #include "rpc_server.h"
 #include "stream_producer.h"
 #include "user_dao.h"
-#include "user_manager.h"
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -26,6 +25,16 @@
 #include <vector>
 
 using namespace im;
+
+// 客户端连接的位置引用：接入层拆分后，IM 用 (gateway_id, conn_id) 定位 Gateway
+// 上的连接，回推时按 gateway_rpc_ip:gateway_rpc_port 把帧发给那个 Gateway。
+struct ClientConnRef {
+  std::string gateway_id;
+  uint64_t conn_id = 0;
+  std::string gateway_rpc_ip;
+  int gateway_rpc_port = 0;
+};
+
 class ImServer {
 public:
   // ip/port:       对外服务地址（客户端和其他 IM Server 都连这里）
@@ -74,20 +83,18 @@ private:
   // Route Server交互
   RouteQueryResponse queryUserRoute(const std::string &user_id);
   std::vector<RouteServer> resolveRoutes(const std::string &user_id);
-  bool registerUserOnline(const std::string &user_id, const ClientConnRef &ref);
-  bool unregisterUserFromRoute(const std::string &user_id,
-                               const ClientConnRef &ref);
+  bool registerUserOnline(const std::string &user_id, const ClientConnRef &ref,
+                          const std::string &session_id);
+  bool unregisterUserFromRouteByConn(const std::string &gateway_id,
+                                     uint64_t conn_id);
+  bool unregisterRoute(const std::string &user_id, const RouteServer &server);
   // 工具：把一个 protobuf 消息打包成 [4字节LE长度][序列化数据] 的帧
   std::string packFrame(const google::protobuf::Message &msg);
 
-  // 发布用户数据变更事件（跨节点踢下线）：target_id 承载
-  // session_id（单会话踢时）
-  void publishUserEvent(im::UserChangedEvent::Type type,
-                        const std::string &user_id,
-                        const std::string &target_id = "");
-
-  // 周期任务：统计并打印在线用户数（样板：定时器回调只发令，重活丢工作池）
-  void reportOnlineStats();
+  // 踢下线（直连，不再广播）：resolveRoutes 后逐连接 push(force_close) + 注销路由
+  void kickUserOffline(const std::string &uid, const std::string &notice_text);
+  void kickSessionOffline(const std::string &uid, const std::string &session_id,
+                          const std::string &notice_text);
 
   // 验证 Gateway 注入的身份：时间戳新鲜度 → nonce 防重放 → HMAC 验签。
   bool verifyIdentity(const RpcHeader &hdr, std::string *err);
@@ -116,15 +123,8 @@ private:
   // Gateway -> IM：通知某连接已断开（gateway_id/conn_id 在 body 里）
   std::string handleClientDisconnect(spConnection conn,
                                      const std::string &request_body);
-  // 事件消费：收到用户数据变更事件后踢下线
-  void onUserChanged(const std::string &payload);
-  void kickOffline(const im::UserChangedEvent &ev);
-
-  // 成员（在 route_subscriber_ 附近加）
-  StreamSubscriber user_subscriber_; // 订阅用户数据变更事件（Stream 广播）
 
   RpcServer rpc_server_;
-  UserManager user_manager_;
   RedisClient nonce_redis_; // 验签 nonce 防重放（SET NX EX 5）F
   MessageStore message_store_;
   StreamProducer producer_; // 消息队列生产者（投递下沉到 deliver_server）

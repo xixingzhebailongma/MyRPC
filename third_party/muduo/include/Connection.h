@@ -25,6 +25,7 @@ private:
   Buffer inputbuffer_;
   Buffer outputbuffer_;
   std::atomic_bool disconnect_;
+  std::atomic_bool close_after_send_{false}; // 发送缓冲刷空后关闭连接（force_close 用）
   Timestamp lastActiveTime_; //最近一次收到数据的时间
   double idletimeout_ = 0.0; //秒；0=禁用（默认不启用空闲检测）
 
@@ -80,6 +81,9 @@ public:
   void send(std::string &&data);
   // 移动语义：调用方交出字符串所有权，省一次深拷贝
   void send(std::shared_ptr<std::string> data);
+  // 发送该帧后，待输出缓冲刷空再关闭连接（替代「send 后立即 forceClose」，
+  // 否则 closecallback 先于 writecallback 执行，帧会被丢弃）。
+  void sendThenClose(const char *data, size_t size);
   // 直接持有共享串，跨线程投递只加引用计数
   // 发送数据，如果当前线程是IO线程，直接调用此函数，如果是工作线程，将把此函数传给IO线程去执行。
   // void sendinloop(const char *data,size_t size);

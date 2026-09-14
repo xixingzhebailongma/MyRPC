@@ -4,7 +4,7 @@
 
 ```bash
 cmake --build build --target bench_async_rpc
-./build/bench/bench_async_rpc --servers=4 --duration=5 --threads=4 --concurrency=16 --payload=64
+./build/tests/bench/bench_async_rpc --servers=4 --duration=5 --threads=4 --concurrency=16 --payload=64
 ```
 
 | 参数 | 含义 |
