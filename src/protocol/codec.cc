@@ -8,7 +8,7 @@ std::string encodeMessage(const RpcMessage &msg) {
   uint32_t len = static_cast<uint32_t>(body_size);
   std::string result;
   result.resize(kHeaderLen + body_size); // 一次分配，含 4 字节长度头
-  std::memcpy(result.data(), &len, kHeaderLen); // 写入长度前缀
+  writeLenBE(result.data(), len);        // 写入大端长度前缀
   if (body_size > 0) {
     // 直接序列化进 result 的 body 区，不再产生中间串
     msg.SerializeToArray(&result[kHeaderLen], static_cast<int>(body_size));
@@ -19,8 +19,7 @@ FrameDecode tryDecodeFrame(const char *data, size_t len, size_t *frame_len,
                            std::string *body) {
   if (len < kHeaderLen)
     return FrameDecode::kNeedMore;
-  uint32_t body_len = 0;
-  std::memcpy(&body_len, data, kHeaderLen); // 读 4 字节 LE 长度
+  uint32_t body_len = readLenBE(data); // 读 4 字节 BE 长度
   if (body_len == 0 || body_len > kMaxMessageLen)
     return FrameDecode::kError; // 非法长度，防坏帧触发巨量分配
   if (len < kHeaderLen + body_len)

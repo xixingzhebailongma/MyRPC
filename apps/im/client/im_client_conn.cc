@@ -237,10 +237,11 @@ bool ImClientConn::readFull(char *buf, size_t n) {
 
 void ImClientConn::readLoop() {
   while (running_.load()) {
-    // 帧格式：[4 字节 LE 长度][payload]
-    uint32_t len = 0;
-    if (!readFull(reinterpret_cast<char *>(&len), 4))
+    // 帧格式：[4 字节 BE 长度][payload]
+    char hdr[kHeaderLen];
+    if (!readFull(hdr, kHeaderLen))
       break;
+    uint32_t len = readLenBE(hdr);
     if (len == 0 || len > kMaxMessageLen) // 长度 sanity check
       break;
 

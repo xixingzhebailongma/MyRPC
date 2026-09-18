@@ -1,6 +1,7 @@
 #include "deliver_server.h"
 #include "Logger.h"
 #include "mq_constants.h"
+#include "rpc_protocol.h"
 #include <chrono>
 #include <memory>
 #include <thread>
@@ -203,7 +204,9 @@ std::string DeliverServer::packFrame(const google::protobuf::Message &msg) {
   msg.SerializeToString(&body);
   uint32_t len = body.size();
   std::string frame;
-  frame.append(reinterpret_cast<const char *>(&len), 4);
+  char lb[kHeaderLen];
+  writeLenBE(lb, len); // 大端长度前缀
+  frame.append(lb, kHeaderLen);
   frame.append(body);
   return frame;
 }

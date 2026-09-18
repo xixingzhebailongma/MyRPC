@@ -44,9 +44,8 @@ int main() {
   // 3. 半帧：数据不完整返回 kNeedMore，且不消费字节
   {
     std::string body = "abcdef";
-    uint32_t len = 6;
     char full[10];
-    std::memcpy(full, &len, 4);
+    writeLenBE(full, 6); // 大端长度 6
     std::memcpy(full + 4, body.data(), 6);
 
     std::string out;
@@ -62,17 +61,33 @@ int main() {
 
   // 4. 坏帧：非法长度（0 或 >64MB）返回 kError，不崩溃
   {
-    uint32_t bad = 0xFFFFFFFFu; // 4GB，超过 64MB 上限
     char hdr[4];
-    std::memcpy(hdr, &bad, 4);
+    writeLenBE(hdr, 0xFFFFFFFFu); // 4GB，超过 64MB 上限
     std::string out;
     size_t fl = 0;
     assert(tryDecodeFrame(hdr, 4, &fl, &out) == FrameDecode::kError);
 
-    uint32_t zero = 0;
     char zhdr[4];
-    std::memcpy(zhdr, &zero, 4);
+    writeLenBE(zhdr, 0);
     assert(tryDecodeFrame(zhdr, 4, &fl, &out) == FrameDecode::kError);
+  }
+
+  // 5. 长度前缀是大端：锁死字节布局，防止回退成主机序
+  {
+    RpcMessage req = buildRequest("Svc", "Method", 1, std::string(300, 'x'));
+    std::string frame = encodeMessage(req);
+    uint32_t expected = static_cast<uint32_t>(req.ByteSizeLong());
+    assert(frame.size() == kHeaderLen + expected);
+    // 逐字节核对大端布局（expected > 255，MSB/LSB 字节不同，能暴露 LE 回退）
+    assert(static_cast<unsigned char>(frame[0]) ==
+           static_cast<unsigned char>((expected >> 24) & 0xff));
+    assert(static_cast<unsigned char>(frame[1]) ==
+           static_cast<unsigned char>((expected >> 16) & 0xff));
+    assert(static_cast<unsigned char>(frame[2]) ==
+           static_cast<unsigned char>((expected >> 8) & 0xff));
+    assert(static_cast<unsigned char>(frame[3]) ==
+           static_cast<unsigned char>(expected & 0xff));
+    assert(readLenBE(frame.data()) == expected);
   }
 
   std::printf("all tests passed\n");

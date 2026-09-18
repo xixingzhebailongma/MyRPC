@@ -4,7 +4,8 @@
 #include <string>
 
 // ===== 帧格式约定 =====
-// 网络帧 = [4 字节 LE uint32 长度][protobuf 序列化后的 RpcMessage]
+// 网络帧 = [4 字节 BE uint32 长度][protobuf 序列化后的 RpcMessage]
+// 长度前缀统一用大端（网络字节序），与主机 little/big endian 无关，跨架构可移植。
 // 长度上限 64MB，超过视为非法帧。
 constexpr uint32_t kHeaderLen = 4;
 constexpr uint32_t kMaxMessageLen = 64u << 20; // 64MB，超过视为非法帧
@@ -17,6 +18,25 @@ constexpr int32_t kErrServerOverloaded = 10007;
 // src/client/rpc_error_code.h 的 RpcError::INVALID_REQUEST_ID 同值。
 // 非临时性错误，客户端不应重试。
 constexpr int32_t kErrInvalidRequestId = 10008;
+
+// ===== 长度前缀字节序（大端 / 网络字节序，集中一处）=====
+// 用显式字节位移而非 htonl/ntohl：零平台头依赖、一眼可证、跨架构一致。
+
+// 写 4 字节大端长度到 dst（dst 至少 4 字节）。
+inline void writeLenBE(char *dst, uint32_t len) {
+  dst[0] = static_cast<char>((len >> 24) & 0xff);
+  dst[1] = static_cast<char>((len >> 16) & 0xff);
+  dst[2] = static_cast<char>((len >> 8) & 0xff);
+  dst[3] = static_cast<char>(len & 0xff);
+}
+
+// 从 p 读 4 字节大端长度。
+inline uint32_t readLenBE(const char *p) {
+  return (static_cast<uint32_t>(static_cast<unsigned char>(p[0])) << 24) |
+         (static_cast<uint32_t>(static_cast<unsigned char>(p[1])) << 16) |
+         (static_cast<uint32_t>(static_cast<unsigned char>(p[2])) << 8) |
+         static_cast<uint32_t>(static_cast<unsigned char>(p[3]));
+}
 
 // ===== 编解码（成对、对称）=====
 
