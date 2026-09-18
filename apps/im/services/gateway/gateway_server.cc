@@ -259,7 +259,7 @@ void GatewayServer::forwardToIm(uint64_t conn_id, std::string payload) {
   }
 
   // 用客户端原来的 sequence_id 回写响应
-  // encodeMessage 已自带 4 字节 LE 长度前缀，不要再套一层
+  // encodeMessage 已自带 4 字节 BE 长度前缀，不要再套一层
   RpcMessage resp = buildResponse(client_seq, ok ? err : -1, resp_body);
   std::string frame = encodeMessage(resp);
   conn->send(frame.data(), frame.size());
@@ -348,7 +348,7 @@ std::string GatewayServer::handlePush(spConnection conn,
     resp.set_success(false);
     return resp.SerializeAsString();
   }
-  // frame 已是 IM 节点打包好的 [4字节LE长度][ServerPushEnvelope]，直写
+  // frame 已是 IM 节点打包好的 [4字节BE长度][ServerPushEnvelope]，直写
   if (req.force_close()) {
     // 刷完帧再关：send + forceClose 都是异步入队，closecallback 会先于
     // writecallback 执行导致帧被丢弃，必须用 sendThenClose 保证先写出再关。

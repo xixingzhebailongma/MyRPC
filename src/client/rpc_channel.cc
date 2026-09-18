@@ -203,10 +203,11 @@ bool RpcChannel::readFull(int fd, char *buf, size_t n) {
 }
 
 bool RpcChannel::readFrame(int fd, std::string &payload) {
-  // 读 4 字节长度前缀
-  uint32_t len = 0;
-  if (!readFull(fd, reinterpret_cast<char *>(&len), 4))
+  // 读 4 字节大端长度前缀
+  char hdr[kHeaderLen];
+  if (!readFull(fd, hdr, kHeaderLen))
     return false;
+  uint32_t len = readLenBE(hdr);
   // 长度校验：0 或超过 64MB 视为非法帧，防止坏帧触发巨量分配
   if (len == 0 || len > kMaxMessageLen) {
     LOG_ERROR("RpcChannel: invalid frame length %u", len);

@@ -9,6 +9,7 @@
 #include "message_store.h"
 #include "mq_constants.h"
 #include "rpc_channel.h"
+#include "rpc_protocol.h"
 #include "user_dao.h"
 #include <chrono>
 #include <ctime>
@@ -168,10 +169,6 @@ std::string ImServer::handleLogin(spConnection conn,
     return resp.SerializeAsString();
   }
 
-  // 约定：username 即 user_id
-  std::string user_id = req.username();
-  std::string session_id;
-
   // 委托 AuthServer：校验密码 + 签发 access/refresh
   auth::LoginRequest areq;
   areq.set_username(req.username());
@@ -197,26 +194,9 @@ std::string ImServer::handleLogin(spConnection conn,
   resp.set_access_token(aresp.access_token());
   resp.set_refresh_token(aresp.refresh_token());
   resp.set_expires_in(aresp.expires_in());
-  session_id = aresp.session().session_id();
 
-  // 2. 连接引用 = 客户端所在的 Gateway 连接（无状态，仅用于注册路由）
-  ClientConnRef ref;
-  ref.gateway_id = hdr.gateway_id();
-  ref.conn_id = hdr.conn_id();
-  ref.gateway_rpc_ip = hdr.gateway_rpc_ip();
-  ref.gateway_rpc_port = hdr.gateway_rpc_port();
-  // 3. 向 Route Server 注册路由
-  bool ok = registerUserOnline(user_id, ref, session_id);
-
-  // 4. 用户上线后投递离线消息
-  auto offline_msgs = message_store_.fetchOfflineMessages(user_id);
-  for (auto &msg : offline_msgs) {
-    deliverLocal(msg);
-  }
-  message_store_.clearOfflineMessages(user_id);
-
-  resp.set_success(ok);
-  resp.set_message(ok ? "login ok" : "route register failed");
+  resp.set_success(true);
+  resp.set_message("login ok");
   return resp.SerializeAsString();
 }
 std::string ImServer::handleRegister(spConnection conn,
@@ -519,7 +499,7 @@ bool ImServer::deliverLocal(const ChatMessage &msg, bool store_on_miss) {
   ServerPushEnvelope envelope;
   envelope.set_type(ServerPushEnvelope::CHAT_MESSAGE);
   msg.SerializeToString(envelope.mutable_payload());
-  // 打包成 [4字节LE长度][ServerPushEnvelope序列化] 帧
+  // 打包成 [4字节BE长度][ServerPushEnvelope序列化] 帧
   std::string frame = packFrame(envelope);
 
   std::vector<RouteServer> servers = resolveRoutes(msg.to_user_id());
@@ -691,7 +671,9 @@ std::string ImServer::packFrame(const google::protobuf::Message &msg) {
   msg.SerializeToString(&body);
   uint32_t len = body.size();
   std::string frame;
-  frame.append(reinterpret_cast<const char *>(&len), 4);
+  char lb[kHeaderLen];
+  writeLenBE(lb, len); // 大端长度前缀
+  frame.append(lb, kHeaderLen);
   frame.append(body);
   return frame;
 }

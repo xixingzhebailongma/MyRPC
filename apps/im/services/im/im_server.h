@@ -88,7 +88,7 @@ private:
   bool unregisterUserFromRouteByConn(const std::string &gateway_id,
                                      uint64_t conn_id);
   bool unregisterRoute(const std::string &user_id, const RouteServer &server);
-  // 工具：把一个 protobuf 消息打包成 [4字节LE长度][序列化数据] 的帧
+  // 工具：把一个 protobuf 消息打包成 [4字节BE长度][序列化数据] 的帧
   std::string packFrame(const google::protobuf::Message &msg);
 
   // 踢下线（直连，不再广播）：resolveRoutes 后逐连接 push(force_close) + 注销路由

@@ -100,7 +100,7 @@ private:
   void readLoop();
   // 发一帧心跳请求；try_lock send_mutex_，拿不到就跳过（见 .cc 死锁说明）。
   bool sendHeartbeat(int fd);
-  // 从 fd 读一帧（4 字节 LE 长度前缀 + payload），校验长度合法性。
+  // 从 fd 读一帧（4 字节 BE 长度前缀 + payload），校验长度合法性。
   // 成功返回 true 并把 payload（不含长度前缀）写入 payload；非法长度不触碰
   // payload。
   bool readFrame(int fd, std::string &payload);

@@ -1,7 +1,7 @@
 // ImClientConn 并发发送回归测试。
 //
 // 复现的缺陷：call() 里的 sendAll() 在任何锁之外调用，两个线程并发 call()
-// 时，各自的 [4字节LE长度][protobuf] 帧会在 socket 上交错，对端按长度前缀
+// 时，各自的 [4字节BE长度][protobuf] 帧会在 socket 上交错，对端按长度前缀
 // 切帧就切歪了，整条连接的流报废。
 //
 // 关键点：必须让 sendAll 里的 ::send 真正分多次返回，否则复现不出来。
@@ -86,9 +86,10 @@ void echoServer(int listenfd, std::atomic<int> *frames_ok,
     return;
 
   for (;;) {
-    uint32_t len = 0;
-    if (!readFullFd(c, reinterpret_cast<char *>(&len), 4))
+    char hdr[4];
+    if (!readFullFd(c, hdr, 4))
       break; // 对端正常关闭
+    uint32_t len = readLenBE(hdr);
     if (len == 0 || len > (64u << 20)) {
       fprintf(stderr, "[echo] 长度前缀不合法 (%u)，流已损坏\n", len);
       stream_corrupted->store(true);
