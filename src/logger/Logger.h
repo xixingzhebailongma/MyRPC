@@ -1,18 +1,18 @@
 #pragma once
 #include "AsyncLogger.h"
+#include "LogLevel.h"
 #include <cstdarg>
 #include <cstdint>
 #include <mutex>
 #include <sstream>
 #include <string>
 
-enum class LogLevel : uint8_t { DEBUG = 0, INFO = 1, WARN = 2, ERROR = 3 };
-
 class Logger {
 public:
   static Logger &instance();
   void init(LogLevel level, const std::string &logFile, bool console,
-            bool dropOnOverflow = true);
+            bool dropOnOverflow = true,
+            LogLevel minGuaranteedLevel = LogLevel::WARN);
 
   void log(LogLevel, const char *file, int line, const char *fmt, ...);
   static LogLevel levelFromString(const std::string &s);

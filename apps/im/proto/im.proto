@@ -132,7 +132,7 @@ message RouteUnregisterRequest {
    // IM 节点 -> Gateway：把已打包的帧推给指定连接
    message GatewayPushRequest {
        uint64 conn_id = 1;
-       bytes  frame   = 2;      // 已打包好的 [4字节LE长度][ServerPushEnvelope]
+       bytes  frame   = 2;      // 已打包好的 [4字节BE长度][ServerPushEnvelope]
        bool   force_close = 3;  // true 时 Gateway 发完帧后 forceClose 该连接
    }
    message GatewayPushResponse { bool success = 1; }

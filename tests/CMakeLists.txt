@@ -7,6 +7,12 @@ target_link_libraries(test_queue
     PRIVATE Threads::Threads
 )
 
+add_executable(test_logger unit/test_logger.cc)
+target_link_libraries(test_logger
+    PRIVATE logger
+    PRIVATE Threads::Threads
+)
+
 add_executable(test_buffer unit/test_buffer.cc)
 target_link_libraries(test_buffer
     PRIVATE muduo
@@ -132,6 +138,7 @@ target_compile_definitions(test_gateway_tls
 
 # ---- CTest 注册 ----
 add_test(NAME test_queue COMMAND test_queue)
+add_test(NAME test_logger COMMAND test_logger)
 add_test(NAME test_buffer COMMAND test_buffer)
 add_test(NAME test_im_conn_concurrency COMMAND test_im_conn_concurrency)
 add_test(NAME test_eventloop_functor_reentry COMMAND test_eventloop_functor_reentry)

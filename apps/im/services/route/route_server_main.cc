@@ -19,8 +19,12 @@ int main(int argc,char* argv[]){
     bool drop_on_overflow = true;
     if (const char *env = std::getenv("MYRPC_LOG_DROP_ON_OVERFLOW"))
         drop_on_overflow = (std::string(env) != "0");
+    // 环境变量 MYRPC_LOG_MIN_GUARANTEED_LEVEL：>= 此等级的日志永不丢弃（默认 WARN）
+    LogLevel min_guaranteed = LogLevel::WARN;
+    if (const char *env = std::getenv("MYRPC_LOG_MIN_GUARANTEED_LEVEL"))
+        min_guaranteed = Logger::levelFromString(env);
     Logger::instance().init(LogLevel::DEBUG, "route_server.log", true,
-                            drop_on_overflow);
+                            drop_on_overflow, min_guaranteed);
 
     //2.默认值
     std::string ip      = "0.0.0.0";
