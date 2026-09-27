@@ -26,17 +26,25 @@ void AsyncLogger::start(const std::string &filePath) {
   thread_ = std::make_unique<std::thread>(&AsyncLogger::threadFunc, this);
 }
 
-void AsyncLogger::append(const char *data, size_t len) {
+void AsyncLogger::append(LogLevel level, const char *data, size_t len) {
   std::string line(data, len); // 一次拷贝，与旧版 curBuffer_.append 等价
-  if (enqueue(std::move(line))) {
+  if (enqueue(level, std::move(line))) {
     consumerCv_.notify_one(); // 不持锁 notify，唤醒消费者降低落盘延迟
   }
 }
 
-bool AsyncLogger::enqueue(std::string &&line) {
+bool AsyncLogger::hasRoom(LogLevel level) const {
+  if (level < minGuaranteedLevel_.load(std::memory_order_relaxed))
+    return queue_.size() < kLowPriorityLimit; // 低等级：仅在预留水位之外可入队
+  return !queue_.full(); // 高等级：只要有槽位即可
+}
+
+bool AsyncLogger::enqueue(LogLevel level, std::string &&line) {
+  LogEntry entry{level, std::move(line)};
+
   // 第 1 层：忙等自旋，吸收瞬时突发（生产者互相抢占、消费者短暂满载）
   for (size_t spin = 0; spin < kMaxSpin; ++spin) {
-    if (queue_.tryEnqueue(std::move(line)))
+    if (hasRoom(level) && queue_.tryEnqueue(std::move(entry)))
       return true;
     _mm_pause(); // 让出流水线，减少自旋功耗/缓存争用
   }
@@ -47,19 +55,22 @@ bool AsyncLogger::enqueue(std::string &&line) {
     std::unique_lock<std::mutex> lk(overflowMutex_);
     bool ok =
         overflowCv_.wait_for(lk, std::chrono::milliseconds(kBlockTimeoutMs),
-                             [this] { return !queue_.full(); });
-    if (ok && queue_.tryEnqueue(std::move(line))) {
+                             [this, level] { return hasRoom(level); });
+    if (ok && hasRoom(level) && queue_.tryEnqueue(std::move(entry))) {
       recordFullWait(elapsedUs(t0)); // 记下这一整段阻塞等待
       return true;
     }
     if (!ok) { // 超时仍满 → 兜底
       onQueueOverflow();
-      if (dropOnOverflow_.load(std::memory_order_relaxed)) { // true 则丢弃
+      if (shouldDrop(level, minGuaranteedLevel_.load(std::memory_order_relaxed),
+                     dropOnOverflow_.load(std::memory_order_relaxed))) {
+        // 只有低等级（且全局允许丢弃）才会丢；高等级永不丢，继续阻塞
         recordFullWait(elapsedUs(t0));
         ++dropped_;
+        ++droppedByLevel_[static_cast<size_t>(level)];
         return false;
       }
-      // 默认不丢：t0 不重置，回循环继续等，等待时间累计
+      // 高等级不丢：t0 不重置，回循环继续等，等待时间累计
     }
   }
 }
@@ -70,7 +81,7 @@ void AsyncLogger::onQueueOverflow() {
     std::cerr << "[AsyncLogger] WARNING: log queue full >" << kBlockTimeoutMs
               << "ms, disk writer falling behind";
     if (dropOnOverflow_.load(std::memory_order_relaxed))
-      std::cerr << " (dropping logs)";
+      std::cerr << " (dropping low-priority logs)";
     std::cerr << std::endl;
   }
 }
@@ -98,11 +109,11 @@ size_t AsyncLogger::histBucket(uint64_t us) {
 }
 
 void AsyncLogger::threadFunc() {
-  std::string line;
+  LogEntry entry;
   while (running_.load(std::memory_order_acquire)) {
     size_t n = 0;
-    while (n < kMaxBatch && queue_.tryDequeue(line)) { // 批量出队写盘
-      file_ << line;
+    while (n < kMaxBatch && queue_.tryDequeue(entry)) { // 批量出队写盘
+      file_ << entry.msg;
       ++n;
     }
     if (n > 0) {
@@ -118,8 +129,8 @@ void AsyncLogger::threadFunc() {
         });
   }
   // 收尾：drain 剩余 + flush + close（修复原来不可达的 final-flush）
-  while (queue_.tryDequeue(line))
-    file_ << line;
+  while (queue_.tryDequeue(entry))
+    file_ << entry.msg;
   file_.flush();
   file_.close();
 }
@@ -136,6 +147,12 @@ void AsyncLogger::stop() {
 // ---- 监控指标 getter ----
 uint64_t AsyncLogger::logsDropped() const {
   return dropped_.load(std::memory_order_relaxed);
+}
+std::array<uint64_t, 4> AsyncLogger::logsDroppedByLevel() const {
+  std::array<uint64_t, 4> snap{};
+  for (size_t i = 0; i < snap.size(); ++i)
+    snap[i] = droppedByLevel_[i].load(std::memory_order_relaxed);
+  return snap;
 }
 uint64_t AsyncLogger::queueFullWaitCount() const {
   return fullWaitCount_.load(std::memory_order_relaxed);

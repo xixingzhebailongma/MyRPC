@@ -43,13 +43,14 @@ Logger &Logger::instance() {
 Logger::~Logger() = default;
 
 void Logger::init(LogLevel level, const std::string &logFile, bool console,
-                  bool dropOnOverflow) {
+                  bool dropOnOverflow, LogLevel minGuaranteedLevel) {
   std::lock_guard<std::mutex> lock(mutex_);
   level_ = level;
   console_ = console;
 
   if (!logFile.empty()) {
     AsyncLogger::instance().setDropOnOverflow(dropOnOverflow);
+    AsyncLogger::instance().setMinGuaranteedLevel(minGuaranteedLevel);
     AsyncLogger::instance().start(logFile);
     fileLoggingEnabled_ = true;
   }
@@ -102,7 +103,7 @@ void Logger::vlog(LogLevel level, const char *file, int line, const char *fmt,
   log_line += '\n';
 
   if (fileLoggingEnabled_) {
-    AsyncLogger::instance().append(log_line.data(), log_line.size());
+    AsyncLogger::instance().append(level, log_line.data(), log_line.size());
   }
 
   std::lock_guard<std::mutex> lock(mutex_);
