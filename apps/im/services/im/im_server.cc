@@ -375,10 +375,14 @@ std::string ImServer::handleSendMessage(spConnection conn,
     // 入队失败 = 消息真正丢失：回滚去重键，允许客户端重试重投
     if (!client_request_id.empty()) {
       message_store_.releaseRequestClaim(uid, client_request_id);
-      LOG_ERROR("handleSendMessage: enqueue failed, released claim for user=%s "
-                "trace_id=%s",
-                uid.c_str(),
-                hdr.trace_id().empty() ? "-" : hdr.trace_id().c_str());
+      LogContext lctx;
+      lctx.trace_id = hdr.trace_id().c_str();
+      lctx.request_id = hdr.request_id().c_str();
+      lctx.msg_id = real_msg_id.c_str();
+      LOG_ERROR_CTX(lctx,
+                    "handleSendMessage: enqueue failed, released claim for "
+                    "user=%s",
+                    uid.c_str());
     }
     resp.set_success(false);
     resp.set_message("enqueue failed");

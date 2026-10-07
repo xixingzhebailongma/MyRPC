@@ -242,12 +242,13 @@ void GatewayServer::forwardToIm(uint64_t conn_id, std::string payload) {
       break;
     }
 
-    LOG_WARN("Gateway forward fail: conn=%llu method=%s attempt=%d node=%s "
-             "trace_id=%s",
-             (unsigned long long)conn_id, method.c_str(), attempt,
-             addr.c_str(),
-             req.header().trace_id().empty() ? "-"
-                                             : req.header().trace_id().c_str());
+    LogContext lctx;
+    lctx.trace_id = req.header().trace_id().c_str();
+    lctx.request_id = req.header().request_id().c_str();
+    LOG_WARN_CTX(lctx,
+                 "Gateway forward fail: conn=%llu method=%s attempt=%d node=%s",
+                 (unsigned long long)conn_id, method.c_str(), attempt,
+                 addr.c_str());
 
     // 仅白名单方法在传输层失败时重试；重试前确认客户端连接还在
     if (!isRetryableMethod(method) || attempt >= kForwardMaxRetries ||

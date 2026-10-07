@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <string>
 #include <thread>
+#include <vector>
 
 static int fail(const char *msg) {
   std::fprintf(stderr, "FAILED: %s\n", msg);
@@ -88,6 +89,33 @@ int main() {
     // 最终值 = 8(旧沉淀) + 7(C 沉淀) = 15；若漏计会得 8。
     if (reg.clientSnapshot().total != 15)
       return fail("commit lost after concurrent render/unregister");
+  }
+
+  // ===== 多线程并发注销不同对象：不丢、不重复、不串扰 =====
+  {
+    const int kThreads = 8;
+    uint64_t baseline = reg.clientSnapshot().total;
+    uint64_t expected_sum = 0;
+    std::vector<std::thread> threads;
+    for (int t = 0; t < kThreads; ++t) {
+      expected_sum += static_cast<uint64_t>(t + 1);
+      threads.emplace_back([&reg, t]() {
+        std::atomic<uint64_t> local{0};
+        uint64_t tok = reg.registerClient(
+            MetricsRegistry::ClientKind::kSync, [&local]() {
+              ClientCounters c;
+              c.total = local.load(std::memory_order_relaxed);
+              return c;
+            });
+        local.store(static_cast<uint64_t>(t + 1));
+        reg.unregisterClient(tok); // 沉淀 t+1
+      });
+    }
+    for (auto &th : threads)
+      th.join();
+
+    if (reg.clientSnapshot().total != baseline + expected_sum)
+      return fail("concurrent unregister total mismatch");
   }
 
   std::printf("PASSED\n");

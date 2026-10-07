@@ -107,14 +107,15 @@ void RpcServer::dispatch(spConnection conn, std::string payload) {
   uint64_t seq = header.sequence_id();
   std::string body = request.body();
   const std::string &trace_id = header.trace_id();
+  LogContext lctx;
+  lctx.trace_id = trace_id.c_str();
+  lctx.request_id = header.request_id().c_str();
 
-  LOG_DEBUG("RpcServer: request service=%s method=%s seq=%lu trace_id=%s",
-            service_name.c_str(), method_name.c_str(), seq,
-            trace_id.empty() ? "-" : trace_id.c_str());
+  LOG_DEBUG_CTX(lctx, "RpcServer: request service=%s method=%s seq=%lu",
+                service_name.c_str(), method_name.c_str(), seq);
   // INFO 级入口：DEBUG 在 release(NDEBUG) 下被剥离，观测/验证需要一条常开日志。
-  LOG_INFO("RpcServer: request service=%s method=%s seq=%lu trace_id=%s",
-           service_name.c_str(), method_name.c_str(), seq,
-           trace_id.empty() ? "-" : trace_id.c_str());
+  LOG_INFO_CTX(lctx, "RpcServer: request service=%s method=%s seq=%lu",
+               service_name.c_str(), method_name.c_str(), seq);
 
   RpcHeader hdr = header; // 完整 header（含 gateway_id/conn_id/client_ip 等）
 

@@ -5,3 +5,10 @@ target_link_libraries(bench_async_rpc
     PRIVATE rpc_server
     PRIVATE Threads::Threads
 )
+
+add_executable(bench_log_format bench_log_format.cc)
+target_link_libraries(bench_log_format
+    PRIVATE rpc_client
+    PRIVATE rpc_server
+    PRIVATE Threads::Threads
+)

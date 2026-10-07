@@ -26,6 +26,7 @@ int main(int argc, char *argv[]) {
   LogLevel min_guaranteed = LogLevel::WARN;
   if (const char *env = std::getenv("MYRPC_LOG_MIN_GUARANTEED_LEVEL"))
     min_guaranteed = Logger::levelFromString(env);
+  Logger::instance().setServiceName("gateway");
   Logger::instance().init(LogLevel::DEBUG, "gateway_server.log", true,
                           drop_on_overflow, min_guaranteed);
 

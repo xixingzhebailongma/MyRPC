@@ -104,9 +104,11 @@ void DeliverServer::onMessage(const std::string &entry_id,
     consumer_.ack(immq::kDeliveryStream, immq::kDeliveryGroup, entry_id);
     return;
   }
-  LOG_INFO("DeliverServer: deliver msg_id=%s to_user=%s trace_id=%s",
-           msg.msg_id().c_str(), msg.to_user_id().c_str(),
-           msg.trace_id().empty() ? "-" : msg.trace_id().c_str());
+  LogContext lctx;
+  lctx.trace_id = msg.trace_id().c_str();
+  lctx.msg_id = msg.msg_id().c_str();
+  LOG_INFO_CTX(lctx, "DeliverServer: deliver to_user=%s",
+               msg.to_user_id().c_str());
   std::string frame = chatFrame(msg);
   for (const auto &s : servers) {
     pushToGateway(s, frame, msg.trace_id());
