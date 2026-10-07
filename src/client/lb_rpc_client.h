@@ -67,4 +67,9 @@ private:
   // pickNodeExcept / CallImpl 无 key 兜底轮询计数
   RpcChannelPool channel_pool_;
   std::mutex mutex_;
+
+  // metrics：failover 计数注册（读值回调）
+  void registerMetrics();
+  void unregisterMetrics();
+  uint64_t metrics_token_{0};
 };

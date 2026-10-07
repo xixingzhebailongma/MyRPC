@@ -17,7 +17,7 @@ class LeaseRenewer; // 新增：租约续期器前向声明
 class RpcServer {
 public:
   RpcServer(const std::string &ip, uint16_t port, int threadnum = 4,
-            int workthreadnum = 8);
+            int workthreadnum = 8, size_t workQueueSize = 8192);
   ~RpcServer();
 
   void start();
@@ -51,7 +51,9 @@ private:
   void onConnection(spConnection conn);
   void rejectOverloaded(spConnection conn, uint64_t seq, bool dedup_enabled,
                         const std::string &cache_key, IdempotencyStore *idem,
-                        const IdemLease &lease, LeaseRenewer *renewer);
+                        const IdemLease &lease, LeaseRenewer *renewer,
+                        const std::string &service, const std::string &method,
+                        uint64_t start_us);
   std::string buildCacheKey(const std::string &service_name,
                             const std::string &method_name,
                             const std::string &request_id,

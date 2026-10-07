@@ -1,5 +1,6 @@
 #include "Logger.h"
 #include "route_server.h"
+#include "metrics_http_server.h"
 #include <atomic>
 #include <chrono>
 #include <csignal>
@@ -33,6 +34,9 @@ int main(int argc,char* argv[]){
     int redis_port = 6379;
     std::string etcd_endpoints = "http://127.0.0.1:2379";
     std::string service_name = "RouteService";
+    // /metrics HTTP 端点（默认只绑 127.0.0.1，仅内网暴露）
+    std::string metrics_bind = "127.0.0.1";
+    int metrics_port = 9090;
 
     // 3. 解析命令行参数（简单字符串匹配）
      for (int i = 1; i < argc; ++i) {
@@ -49,6 +53,10 @@ int main(int argc,char* argv[]){
              etcd_endpoints = arg.substr(17);
          } else if (arg.rfind("--service.name=", 0) == 0) {
              service_name = arg.substr(15);
+         } else if (arg.rfind("--metrics.port=", 0) == 0) {
+             metrics_port = std::stoi(arg.substr(15));
+         } else if (arg.rfind("--metrics.bind=", 0) == 0) {
+             metrics_bind = arg.substr(15);
          }
      }
 
@@ -56,6 +64,10 @@ int main(int argc,char* argv[]){
      //    注册到 etcd）
 
      RouteServer server(ip,port,redis_ip,redis_port,etcd_endpoints,service_name);
+
+     // /metrics HTTP 端点（默认只绑 127.0.0.1，仅内网暴露）
+     MetricsHttpServer metrics(metrics_bind, static_cast<uint16_t>(metrics_port));
+     metrics.start();
 
      //启动
      server.start();

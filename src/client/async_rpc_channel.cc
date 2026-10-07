@@ -6,6 +6,7 @@
 #include "Logger.h"
 #include "TcpClient.h"
 #include "rpc_error_code.h"
+#include "metrics_registry.h"
 #include <chrono>
 #include <sys/socket.h>
 
@@ -27,9 +28,30 @@ AsyncRpcChannel::AsyncRpcChannel(EventLoop *loop, const std::string &ip,
       idle_ttl_ms_(cfg.channel_idle_ttl_ms) {
   last_used_ms_.store(nowMs());
   client_.reset(new TcpClient(loop, InetAddress(ip, port), "AsyncRpcChannel"));
+  registerMetrics();
 }
 
-AsyncRpcChannel::~AsyncRpcChannel() { client_.reset(); }
+AsyncRpcChannel::~AsyncRpcChannel() {
+  unregisterMetrics();
+  client_.reset();
+}
+
+void AsyncRpcChannel::registerMetrics() {
+  metrics_token_ = MetricsRegistry::instance().registerClient(
+      MetricsRegistry::ClientKind::kAsync, [this]() {
+        ClientCounters c;
+        c.total = total_calls_.load(std::memory_order_relaxed);
+        c.failed = fail_calls_.load(std::memory_order_relaxed);
+        return c;
+      });
+}
+
+void AsyncRpcChannel::unregisterMetrics() {
+  if (metrics_token_ != 0) {
+    MetricsRegistry::instance().unregisterClient(metrics_token_);
+    metrics_token_ = 0;
+  }
+}
 
 void AsyncRpcChannel::connect() {
   if (closed_.load())

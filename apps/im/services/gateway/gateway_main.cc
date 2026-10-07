@@ -1,5 +1,6 @@
 #include "Logger.h"
 #include "gateway_server.h"
+#include "metrics_http_server.h"
 #include <atomic>
 #include <chrono>
 #include <csignal>
@@ -39,6 +40,9 @@ int main(int argc, char *argv[]) {
   std::string shared_secret = "";
   std::string tls_cert = "";
   std::string tls_key = "";
+  // /metrics HTTP 端点（默认只绑 127.0.0.1，仅内网暴露）
+  std::string metrics_bind = "127.0.0.1";
+  int metrics_port = 9093;
 
   for (int i = 1; i < argc; ++i) {
     std::string arg = argv[i];
@@ -64,6 +68,10 @@ int main(int argc, char *argv[]) {
       tls_cert = arg.substr(11);
     } else if (arg.rfind("--tls.key=", 0) == 0) {
       tls_key = arg.substr(10);
+    } else if (arg.rfind("--metrics.port=", 0) == 0) {
+      metrics_port = std::stoi(arg.substr(15));
+    } else if (arg.rfind("--metrics.bind=", 0) == 0) {
+      metrics_bind = arg.substr(15);
     }
   }
 
@@ -76,6 +84,10 @@ int main(int argc, char *argv[]) {
   }
   LOG_INFO("Gateway %s: client=%s:%d rpc=%s:%d", gateway_id.c_str(),
            client_ip.c_str(), client_port, rpc_ip.c_str(), rpc_port);
+
+  // /metrics HTTP 端点（默认只绑 127.0.0.1，仅内网暴露）
+  MetricsHttpServer metrics(metrics_bind, static_cast<uint16_t>(metrics_port));
+  metrics.start();
 
   gw.start();
   signal(SIGINT, signalHandler);

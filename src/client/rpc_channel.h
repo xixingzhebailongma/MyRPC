@@ -147,4 +147,9 @@ private:
   std::map<uint64_t, RpcMessage> responses_; // seq -> 完整响应（含 error_code）
   std::set<uint64_t> pending_; // seq -> 等待响应的请求（Call 内部 cv 等待）
   bool closed_ = false; // 连接已断开，由 mutex_ 保护
+
+  // metrics：客户端计数器注册（读值回调，token 用于析构注销）
+  void registerMetrics();
+  void unregisterMetrics();
+  uint64_t metrics_token_{0};
 };

@@ -4,6 +4,7 @@
 #include "rpc_channel.h"
 #include "rpc_error_code.h"
 #include "service_discovery.h"
+#include "metrics_registry.h"
 #include "uuid.h"
 #include <algorithm>
 #include <mutex>
@@ -27,6 +28,7 @@ LbRpcClient::LbRpcClient(const std::string &etcdEndpoints,
   discovery_->watch(serviceName_, [this](const ServiceNodeEvent &e) {
     onNodeEvent(e);
   });
+  registerMetrics();
 }
 // watch 推送的节点变化：增量应用 Add/Remove，全量 ReplaceAll 直接替换
 void LbRpcClient::onNodeEvent(const ServiceNodeEvent &e) {
@@ -236,6 +238,23 @@ bool LbRpcClient::CallImpl(const std::string &methodName,
 }
 
 LbRpcClient::~LbRpcClient() {
+  unregisterMetrics();
   // 停 watch（阻塞等 watch 线程退出），再随成员析构销毁
   discovery_->stopWatch();
+}
+
+void LbRpcClient::registerMetrics() {
+  metrics_token_ = MetricsRegistry::instance().registerClient(
+      MetricsRegistry::ClientKind::kFailover, [this]() {
+        ClientCounters c;
+        c.failover = failover_count_.load(std::memory_order_relaxed);
+        return c;
+      });
+}
+
+void LbRpcClient::unregisterMetrics() {
+  if (metrics_token_ != 0) {
+    MetricsRegistry::instance().unregisterClient(metrics_token_);
+    metrics_token_ = 0;
+  }
 }

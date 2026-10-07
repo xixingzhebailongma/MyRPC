@@ -71,6 +71,10 @@ public:
   // 熔断状态（供 AsyncLbRpcClient 跳过熔断节点）
   bool isCircuitOpen() const;
   int consecutiveFailures() const { return consecutive_failures_.load(); }
+  // metrics：客户端计数器 getter（读值回调只读这些，统一暴露）
+  uint64_t totalCalls() const { return total_calls_.load(); }
+  uint64_t successCalls() const { return success_calls_.load(); }
+  uint64_t failCalls() const { return fail_calls_.load(); }
   // 空闲回收：ttl_ms 内无调用则关闭并从连接池剔除；0 = 禁用。
   void setIdleTimeout(uint64_t ttl_ms);
   // 空闲到期回调（由 AsyncRpcClient 绑定：从池中 erase + close）。
@@ -149,4 +153,9 @@ private:
   std::atomic<uint64_t> success_calls_{0};
   std::atomic<uint64_t> fail_calls_{0};
   std::atomic<uint64_t> last_used_ms_{0}; // 最近一次 Call 时间（单调 ms）
+
+  // metrics：客户端计数器注册（读值回调）
+  void registerMetrics();
+  void unregisterMetrics();
+  uint64_t metrics_token_{0};
 };

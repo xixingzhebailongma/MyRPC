@@ -12,6 +12,7 @@ target_include_directories(rpc_client
 target_link_libraries(rpc_client
     PUBLIC protocol
     PUBLIC logger
+    PUBLIC metrics
 )
 
 
@@ -42,6 +43,7 @@ target_link_libraries(rpc_async_client
     PUBLIC muduo
     PUBLIC protocol
     PUBLIC logger
+    PUBLIC metrics
 )
 
 

@@ -1,5 +1,6 @@
 #include "Logger.h"
 #include "im_server.h"
+#include "metrics_http_server.h"
 #include <atomic>
 #include <chrono>
 #include <csignal>
@@ -44,6 +45,9 @@ int main(int argc, char *argv[]) {
   std::string mysql_password = "";
   std::string mysql_db = "myrpc_im";
   int mysql_pool_size = 4;
+  // /metrics HTTP 端点（默认只绑 127.0.0.1，仅内网暴露）
+  std::string metrics_bind = "127.0.0.1";
+  int metrics_port = 9092;
   // 3. 解析命令行参数（简单字符串匹配）
   for (int i = 1; i < argc; ++i) {
     std::string arg = argv[i];
@@ -79,6 +83,10 @@ int main(int argc, char *argv[]) {
       auth_service = arg.substr(15);
     } else if (arg.rfind("--shared.secret=", 0) == 0) {
       shared_secret = arg.substr(16);
+    } else if (arg.rfind("--metrics.port=", 0) == 0) {
+      metrics_port = std::stoi(arg.substr(15));
+    } else if (arg.rfind("--metrics.bind=", 0) == 0) {
+      metrics_bind = arg.substr(15);
     }
   }
   DbConfig db_cfg;
@@ -93,6 +101,9 @@ int main(int argc, char *argv[]) {
                   redis_ip, redis_port, db_cfg, auth_service, shared_secret);
 
   LOG_INFO("Redis connected at %s:%d", redis_ip.c_str(), redis_port);
+  // /metrics HTTP 端点（默认只绑 127.0.0.1，仅内网暴露）
+  MetricsHttpServer metrics(metrics_bind, static_cast<uint16_t>(metrics_port));
+  metrics.start();
   //启动
   server.start();
   LOG_INFO("IM Server started on %s:%d", ip.c_str(), port);

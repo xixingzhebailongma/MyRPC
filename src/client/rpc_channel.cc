@@ -3,6 +3,7 @@
 #include "rpc_error_code.h"
 #include "rpc_header.pb.h"
 #include "rpc_protocol.h"
+#include "metrics_registry.h"
 #include <arpa/inet.h>
 #include <cerrno>
 #include <chrono>
@@ -16,7 +17,9 @@
 RpcChannel::RpcChannel(const std::string &server_ip, uint16_t server_port,
                        int timeout_ms, int connect_timeout_ms)
     : server_ip_(server_ip), server_port_(server_port), timeout_ms_(timeout_ms),
-      connect_timeout_ms_(connect_timeout_ms) {}
+      connect_timeout_ms_(connect_timeout_ms) {
+  registerMetrics();
+}
 
 RpcChannel::RpcChannel(const std::string &server_ip, uint16_t server_port,
                        const RpcClientConfig &cfg)
@@ -26,8 +29,33 @@ RpcChannel::RpcChannel(const std::string &server_ip, uint16_t server_port,
       server_port_(server_port), timeout_ms_(cfg.timeout_ms),
       connect_timeout_ms_(cfg.connect_timeout_ms),
       heartbeat_interval_ms_(cfg.heartbeat_interval_ms),
-      heartbeat_miss_threshold_(cfg.heartbeat_miss_threshold) {}
-RpcChannel::~RpcChannel() { close(); }
+      heartbeat_miss_threshold_(cfg.heartbeat_miss_threshold) {
+  registerMetrics();
+}
+RpcChannel::~RpcChannel() {
+  unregisterMetrics();
+  close();
+}
+
+void RpcChannel::registerMetrics() {
+  metrics_token_ = MetricsRegistry::instance().registerClient(
+      MetricsRegistry::ClientKind::kSync, [this]() {
+        ClientCounters c;
+        c.total = total_calls_.load(std::memory_order_relaxed);
+        c.failed = fail_calls_.load(std::memory_order_relaxed);
+        c.latency_sum_us =
+            total_latency_us_.load(std::memory_order_relaxed);
+        c.latency_max_us = max_latency_us_.load(std::memory_order_relaxed);
+        return c;
+      });
+}
+
+void RpcChannel::unregisterMetrics() {
+  if (metrics_token_ != 0) {
+    MetricsRegistry::instance().unregisterClient(metrics_token_);
+    metrics_token_ = 0;
+  }
+}
 
 bool RpcChannel::connect() {
   std::lock_guard<std::mutex> lock(connect_mutex_);

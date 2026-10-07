@@ -121,6 +121,19 @@ target_link_libraries(test_rpc_server_idempotency
     PRIVATE Threads::Threads
 )
 
+add_executable(test_server_metrics unit/test_server_metrics.cc)
+target_link_libraries(test_server_metrics
+    PRIVATE rpc_server
+    PRIVATE rpc_client
+    PRIVATE metrics
+    PRIVATE Threads::Threads
+)
+
+add_executable(test_client_metrics unit/test_client_metrics.cc)
+target_link_libraries(test_client_metrics
+    PRIVATE metrics
+)
+
 add_executable(test_rpc_lb_failover_etcd unit/test_rpc_lb_failover_etcd.cc)
 target_link_libraries(test_rpc_lb_failover_etcd
     PRIVATE rpc_server
@@ -173,6 +186,8 @@ add_test(NAME test_async_lb_rpc_client COMMAND test_async_lb_rpc_client)
 add_test(NAME test_rpc_server_e2e COMMAND test_rpc_server_e2e)
 add_test(NAME test_rpc_server_concurrency COMMAND test_rpc_server_concurrency)
 add_test(NAME test_rpc_server_idempotency COMMAND test_rpc_server_idempotency)
+add_test(NAME test_server_metrics COMMAND test_server_metrics)
+add_test(NAME test_client_metrics COMMAND test_client_metrics)
 add_test(NAME test_rpc_lb_failover_etcd COMMAND test_rpc_lb_failover_etcd)
 add_test(NAME test_watch_incremental COMMAND test_watch_incremental)
 add_test(NAME test_gateway_tls COMMAND test_gateway_tls)

@@ -11,4 +11,5 @@ target_link_libraries(rpc_server
     PUBLIC muduo
     PUBLIC protocol
     PUBLIC registry
+    PUBLIC metrics
 )

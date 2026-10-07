@@ -1,5 +1,6 @@
 #include "Logger.h"
 #include "deliver_server.h"
+#include "metrics_http_server.h"
 #include <atomic>
 #include <chrono>
 #include <csignal>
@@ -33,6 +34,9 @@ int main(int argc, char *argv[]) {
   std::string redis_ip = "127.0.0.1";
   int redis_port = 6379;
   std::string consumer_name = "deliver-1";
+  // /metrics HTTP 端点（默认只绑 127.0.0.1，仅内网暴露）
+  std::string metrics_bind = "127.0.0.1";
+  int metrics_port = 9094;
 
   for (int i = 1; i < argc; ++i) {
     std::string arg = argv[i];
@@ -50,6 +54,10 @@ int main(int argc, char *argv[]) {
       redis_port = std::stoi(arg.substr(13));
     } else if (arg.rfind("--consumer.name=", 0) == 0) {
       consumer_name = arg.substr(16);
+    } else if (arg.rfind("--metrics.port=", 0) == 0) {
+      metrics_port = std::stoi(arg.substr(15));
+    } else if (arg.rfind("--metrics.bind=", 0) == 0) {
+      metrics_bind = arg.substr(15);
     }
   }
 
@@ -59,6 +67,10 @@ int main(int argc, char *argv[]) {
     LOG_ERROR("deliver_server: init failed");
     return 1;
   }
+  // /metrics HTTP 端点（默认只绑 127.0.0.1，仅内网暴露）
+  MetricsHttpServer metrics(metrics_bind, static_cast<uint16_t>(metrics_port));
+  metrics.start();
+
   server.start();
   LOG_INFO("DeliverServer started (consumer=%s)", consumer_name.c_str());
 
