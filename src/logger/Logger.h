@@ -28,6 +28,7 @@ public:
 
   // 进程内服务名：各 main 启动时设一次，框架层日志自动带上。
   void setServiceName(const std::string &name) { service_ = name; }
+  const std::string &serviceName() const { return service_; }
 
   void log(LogLevel, const char *file, int line, const char *fmt, ...);
   void logCtx(LogLevel, const char *file, int line, const LogContext &ctx,

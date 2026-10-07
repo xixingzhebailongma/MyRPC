@@ -45,6 +45,8 @@ package im;
      int32 chat_type = 7;      // 0=单聊, 1=群聊
      MessageStatus status = 8;
      string trace_id = 9;    // 端到端关联 ID，随消息经 Redis Stream 透传到 deliver
+     string span_id = 10;    // producer span_id：随消息透传，deliver 据此设 consumer span 的 parent
+     string parent_span_id = 11; // producer span 的 parent（上下文完整）
  }
 
  //新增ACK消息

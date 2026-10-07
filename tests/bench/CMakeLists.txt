@@ -12,3 +12,11 @@ target_link_libraries(bench_log_format
     PRIVATE rpc_server
     PRIVATE Threads::Threads
 )
+
+add_executable(bench_span_export bench_span_export.cc)
+target_link_libraries(bench_span_export
+    PRIVATE rpc_client
+    PRIVATE rpc_server
+    PRIVATE metrics
+    PRIVATE Threads::Threads
+)

@@ -1,6 +1,7 @@
 #include "Logger.h"
 #include "route_server.h"
 #include "metrics_http_server.h"
+#include "span_exporter.h"
 #include <atomic>
 #include <chrono>
 #include <csignal>
@@ -27,6 +28,7 @@ int main(int argc,char* argv[]){
     Logger::instance().setServiceName("route");
     Logger::instance().init(LogLevel::DEBUG, "route_server.log", true,
                             drop_on_overflow, min_guaranteed);
+    SpanExporter::instance().init("spans_route.jsonl");
 
     //2.默认值
     std::string ip      = "0.0.0.0";

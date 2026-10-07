@@ -1,6 +1,7 @@
 #include "Logger.h"
 #include "auth_server.h"
 #include "metrics_http_server.h"
+#include "span_exporter.h"
 #include <atomic>
 #include <chrono>
 #include <csignal>
@@ -27,6 +28,7 @@ int main(int argc, char *argv[]) {
   Logger::instance().setServiceName("auth");
   Logger::instance().init(LogLevel::DEBUG, "auth_server.log", true,
                           drop_on_overflow, min_guaranteed);
+  SpanExporter::instance().init("spans_auth.jsonl");
 
   // 默认值
   std::string ip = "0.0.0.0";

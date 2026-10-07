@@ -1,6 +1,8 @@
 #include "im.pb.h"
 #include "im_client_conn.h"
 #include "request_id.h"
+#include "Logger.h"
+#include "span_exporter.h"
 #include <atomic>
 #include <chrono>
 #include <csignal>
@@ -132,6 +134,9 @@ static bool bindViaTicket(ImClientConn &c, const std::string &at,
 int main(int argc, char **argv) {
   // SSL_write 无法带 MSG_NOSIGNAL，忽略 SIGPIPE 防止进程被对端断开杀死。
   signal(SIGPIPE, SIG_IGN);
+  // 根 client span：service=client，导出到当前目录 spans.jsonl。
+  Logger::instance().setServiceName("client");
+  SpanExporter::instance().init("spans_client.jsonl");
 
   // 解析 --server.ip / --server.port / --tls.ca / --tls.insecure
   for (int i = 1; i < argc; ++i) {

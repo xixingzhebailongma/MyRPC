@@ -8,6 +8,7 @@ compile_commands.json
 *.pb.h
 apps/im/certs/
 *.log
+spans*.jsonl
 
 # 编辑器 / IDE 临时文件
 .vscode/

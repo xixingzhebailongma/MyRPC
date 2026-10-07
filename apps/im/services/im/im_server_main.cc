@@ -1,6 +1,7 @@
 #include "Logger.h"
 #include "im_server.h"
 #include "metrics_http_server.h"
+#include "span_exporter.h"
 #include <atomic>
 #include <chrono>
 #include <csignal>
@@ -27,6 +28,7 @@ int main(int argc, char *argv[]) {
   Logger::instance().setServiceName("im");
   Logger::instance().init(LogLevel::DEBUG, "im_server.log", true,
                           drop_on_overflow, min_guaranteed);
+  SpanExporter::instance().init("spans_im.jsonl");
   // 2. 默认值
   std::string ip = "0.0.0.0";
   int port = 9001;

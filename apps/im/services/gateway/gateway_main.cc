@@ -1,6 +1,7 @@
 #include "Logger.h"
 #include "gateway_server.h"
 #include "metrics_http_server.h"
+#include "span_exporter.h"
 #include <atomic>
 #include <chrono>
 #include <csignal>
@@ -29,6 +30,7 @@ int main(int argc, char *argv[]) {
   Logger::instance().setServiceName("gateway");
   Logger::instance().init(LogLevel::DEBUG, "gateway_server.log", true,
                           drop_on_overflow, min_guaranteed);
+  SpanExporter::instance().init("spans_gateway.jsonl");
 
   std::string client_ip = "0.0.0.0";
   int client_port = 9000; // 客户端连这个端口

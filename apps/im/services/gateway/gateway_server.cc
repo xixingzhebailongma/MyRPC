@@ -5,12 +5,28 @@
 #include "im.pb.h"
 #include "rpc_protocol.h"
 #include "uuid.h"
+#include "metrics_registry.h"
+#include "span_exporter.h"
+#include "span_id.h"
 #include <chrono>
 #include <cstdint>
 #include <ctime>
 #include <string>
 #include <thread>
 #include <unordered_set>
+
+namespace {
+// forwardToIm 的 span 守卫：作用域退出时导出（覆盖所有提前 return）。
+struct SpanGuard {
+  Span span;
+  bool ok = false;
+  ~SpanGuard() {
+    span.end_us = monotonicUs();
+    span.status = ok ? "OK" : "ERROR";
+    SpanExporter::instance().exportSpan(span);
+  }
+};
+} // namespace
 
 GatewayServer::GatewayServer(const std::string &client_ip, uint16_t client_port,
                              const std::string &rpc_ip, uint16_t rpc_port,
@@ -174,6 +190,16 @@ void GatewayServer::forwardToIm(uint64_t conn_id, std::string payload) {
   }
   uint64_t client_seq = req.header().sequence_id();
 
+  // gateway.forwardToIm 手动 span：parent = 客户端 span_id；span_id 写入 header 透传。
+  SpanGuard guard;
+  guard.span.trace_id = req.header().trace_id();
+  guard.span.parent_span_id = req.header().span_id();
+  guard.span.span_id = generateSpanId();
+  guard.span.method = "forwardToIm";
+  guard.span.start_us = monotonicUs();
+  req.mutable_header()->set_span_id(guard.span.span_id);
+  req.mutable_header()->set_parent_span_id(guard.span.parent_span_id);
+
   // ===== 信任域入口：按连接认证状态分流 =====
   Identity id;
   bool authenticated = false;
@@ -266,6 +292,8 @@ void GatewayServer::forwardToIm(uint64_t conn_id, std::string payload) {
       it->second.bound = true;
     }
   }
+
+  guard.ok = ok; // forwardToIm span 收尾状态
 
   // 用客户端原来的 sequence_id 回写响应
   // encodeMessage 已自带 4 字节 BE 长度前缀，不要再套一层

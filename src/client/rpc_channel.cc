@@ -4,6 +4,8 @@
 #include "rpc_header.pb.h"
 #include "rpc_protocol.h"
 #include "metrics_registry.h"
+#include "span_exporter.h"
+#include "span_id.h"
 #include <arpa/inet.h>
 #include <cerrno>
 #include <chrono>
@@ -317,7 +319,8 @@ bool RpcChannel::Call(const std::string &service_name,
                       const std::string &request_body,
                       std::string &response_body, int32_t &error_code,
                       int timeout_ms, const std::string &request_id,
-                      const std::string &trace_id) {
+                      const std::string &trace_id,
+                      const std::string &parent_span_id) {
   // seq 占位传 0，由 callImpl 统一覆盖
   RpcMessage request = buildRequest(service_name, method_name, 0, request_body);
   if (!request_id.empty()) {
@@ -325,6 +328,10 @@ bool RpcChannel::Call(const std::string &service_name,
   }
   if (!trace_id.empty()) {
     request.mutable_header()->set_trace_id(trace_id);
+  }
+  // 调用方当前 span_id：作为 client span 的 parent（callImpl 里读 header.span_id）。
+  if (!parent_span_id.empty()) {
+    request.mutable_header()->set_span_id(parent_span_id);
   }
   return callImpl(request, response_body, error_code, timeout_ms);
 }
@@ -347,9 +354,27 @@ bool RpcChannel::callImpl(const RpcMessage &request, std::string &response_body,
   total_calls_.fetch_add(1, std::memory_order_relaxed);
   int effective_timeout = timeout_ms < 0 ? timeout_ms_.load() : timeout_ms;
 
+  // client span：本跳发送方 span；parent = 上游 span_id（CallMessage 场景），根为空。
+  const std::string span_trace = request.header().trace_id();
+  const std::string span_parent = request.header().span_id();
+  const std::string span_id = generateSpanId();
+  const std::string span_method = request.header().method_name();
+  auto finishSpan = [&](bool ok) {
+    Span s;
+    s.trace_id = span_trace;
+    s.span_id = span_id;
+    s.parent_span_id = span_parent;
+    s.method = span_method;
+    s.start_us = t0;
+    s.end_us = nowUs();
+    s.status = ok ? "OK" : "ERROR";
+    SpanExporter::instance().exportSpan(s);
+  };
+
   if (sockfd_.load() < 0 && !connect()) {
     recordFailure();
     recordOutcome(false, t0);
+    finishSpan(false);
     error_code = static_cast<int32_t>(RpcError::CONNECTION_REFUSED);
     return false;
   }
@@ -358,6 +383,8 @@ bool RpcChannel::callImpl(const RpcMessage &request, std::string &response_body,
   uint64_t seq = next_seq_id_.fetch_add(1);
   RpcMessage req = request;
   req.mutable_header()->set_sequence_id(seq);
+  req.mutable_header()->set_span_id(span_id);
+  req.mutable_header()->set_parent_span_id(span_parent);
   std::string wire_data = encodeMessage(req);
 
   {
@@ -376,6 +403,7 @@ bool RpcChannel::callImpl(const RpcMessage &request, std::string &response_body,
       }
       recordFailure();
       recordOutcome(false, t0);
+      finishSpan(false);
       error_code = static_cast<int32_t>(RpcError::CONNECTION_BROKEN);
       return false;
     }
@@ -388,6 +416,7 @@ bool RpcChannel::callImpl(const RpcMessage &request, std::string &response_body,
   if (!ok) {
     recordFailure();
     recordOutcome(false, t0);
+    finishSpan(false);
     error_code = static_cast<int32_t>(RpcError::TIMEOUT);
     return false;
   }
@@ -396,6 +425,7 @@ bool RpcChannel::callImpl(const RpcMessage &request, std::string &response_body,
   if (it == responses_.end()) {
     recordFailure();
     recordOutcome(false, t0);
+    finishSpan(false);
     error_code = static_cast<int32_t>(RpcError::SERVER_ERROR);
     return false;
   }
@@ -405,5 +435,6 @@ bool RpcChannel::callImpl(const RpcMessage &request, std::string &response_body,
   response_body = std::move(resp.body());
   recordSuccess();
   recordOutcome(true, t0);
+  finishSpan(true);
   return true;
 }

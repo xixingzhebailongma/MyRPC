@@ -32,7 +32,7 @@ private:
   std::vector<im::RouteServer> resolveRoutes(const std::string &user_id);
   im::RouteQueryResponse queryUserRoute(const std::string &user_id);
   bool pushToGateway(const im::RouteServer &server, const std::string &frame,
-                     const std::string &trace_id);
+                     const std::string &trace_id, const std::string &span_id);
   std::string chatFrame(const im::ChatMessage &msg);
   std::string packFrame(const google::protobuf::Message &msg);
 

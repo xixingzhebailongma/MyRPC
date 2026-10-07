@@ -1,6 +1,9 @@
 #include "im_client_conn.h"
 #include "rpc_protocol.h"
 #include "uuid.h"
+#include "metrics_registry.h"
+#include "span_exporter.h"
+#include "span_id.h"
 #include <arpa/inet.h>
 #include <cerrno>
 #include <chrono>
@@ -289,13 +292,27 @@ std::string ImClientConn::call(const std::string &service_name,
   if (req.header().trace_id().empty()) {
     req.mutable_header()->set_trace_id(generateUuid());
   }
+  // 根 client span：parent 为空（本进程是调用链起点）。
+  Span root_span;
+  root_span.trace_id = req.header().trace_id();
+  root_span.span_id = generateSpanId();
+  root_span.method = method_name;
+  root_span.start_us = monotonicUs();
+  req.mutable_header()->set_span_id(root_span.span_id);
+  auto finishSpan = [&](bool ok) {
+    root_span.end_us = monotonicUs();
+    root_span.status = ok ? "OK" : "ERROR";
+    SpanExporter::instance().exportSpan(root_span);
+  };
   std::string wire = encodeMessage(req);
   {
     // 整帧原子发送。少了这把锁，两个线程的帧会在 socket 上交错，
     // 对端按长度前缀切帧就切歪了，整条连接的流报废。
     std::lock_guard<std::mutex> lock(send_mutex_);
-    if (!sendAll(wire.data(), wire.size()))
+    if (!sendAll(wire.data(), wire.size())) {
+      finishSpan(false);
       return "";
+    }
   }
 
   std::unique_lock<std::mutex> lock(mutex_);
@@ -303,15 +320,19 @@ std::string ImClientConn::call(const std::string &service_name,
                          [&] { return closed_ || responses_.count(seq) != 0; });
   if (!ok) {
     responses_.erase(seq); // 超时：清掉可能晚到的响应，避免 map 无界增长
+    finishSpan(false);
     return "";
   }
   // 先查 map 再看 closed_：响应已投递、紧接着 readLoop 才读到错误退出的情况下，
   // 调用方仍应拿到这个有效响应。
   auto it = responses_.find(seq);
-  if (it == responses_.end())
+  if (it == responses_.end()) {
+    finishSpan(false);
     return ""; // 被 closed_ 唤醒且无响应
+  }
   std::string result = std::move(it->second);
   responses_.erase(it);
+  finishSpan(true);
   return result;
 }
 

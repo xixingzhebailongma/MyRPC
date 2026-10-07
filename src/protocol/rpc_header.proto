@@ -34,7 +34,10 @@ syntax = "proto3";
       string nonce     = 14;      // Gateway 每条请求生成的随机 nonce（防重放）
       string signature = 15;      // HMAC-SHA256 hex，IM 验证
       string trace_id = 16;       // 端到端关联 ID：客户端优先生成，网关兜底，下游只透传
-    } 
+      string span_id = 17;        // 当前 span：本跳发送方生成，下游据其设 parent
+      string parent_span_id = 18; // 上游 span_id（根为空）
+      int32  trace_flags = 19;    // 预留（采样等语义后续实现，本阶段只透传）
+    }
 
   message RpcMessage {
     RpcHeader header = 1;

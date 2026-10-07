@@ -1,6 +1,7 @@
 #include "Logger.h"
 #include "deliver_server.h"
 #include "metrics_http_server.h"
+#include "span_exporter.h"
 #include <atomic>
 #include <chrono>
 #include <csignal>
@@ -27,6 +28,7 @@ int main(int argc, char *argv[]) {
   Logger::instance().setServiceName("deliver");
   Logger::instance().init(LogLevel::DEBUG, "deliver_server.log", true,
                           drop_on_overflow, min_guaranteed);
+  SpanExporter::instance().init("spans_deliver.jsonl");
 
   std::string server_id = "deliver";
   uint64_t worker_id = 0;

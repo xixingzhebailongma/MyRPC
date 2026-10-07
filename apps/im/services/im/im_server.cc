@@ -10,6 +10,9 @@
 #include "mq_constants.h"
 #include "rpc_channel.h"
 #include "rpc_protocol.h"
+#include "metrics_registry.h"
+#include "span_exporter.h"
+#include "span_id.h"
 #include "user_dao.h"
 #include <chrono>
 #include <ctime>
@@ -367,6 +370,16 @@ std::string ImServer::handleSendMessage(spConnection conn,
     // kFirst：继续入队
   }
 
+  // producer span：parent = 本服务 server span（hdr.span_id，dispatch 已写入）。
+  Span producer_span;
+  producer_span.trace_id = hdr.trace_id();
+  producer_span.parent_span_id = hdr.span_id();
+  producer_span.span_id = generateSpanId();
+  producer_span.method = "enqueue";
+  producer_span.start_us = monotonicUs();
+  msg.set_span_id(producer_span.span_id);
+  msg.set_parent_span_id(producer_span.parent_span_id);
+
   // 投递+重试下沉到 deliver_server：这里只「快入队、快返回」
   std::string payload;
   msg.SerializeToString(&payload);
@@ -384,12 +397,18 @@ std::string ImServer::handleSendMessage(spConnection conn,
                     "user=%s",
                     uid.c_str());
     }
+    producer_span.end_us = monotonicUs();
+    producer_span.status = "ERROR";
+    SpanExporter::instance().exportSpan(producer_span);
     resp.set_success(false);
     resp.set_message("enqueue failed");
     std::string out;
     resp.SerializeToString(&out);
     return out;
   }
+  producer_span.end_us = monotonicUs();
+  producer_span.status = "OK";
+  SpanExporter::instance().exportSpan(producer_span);
   message_store_.markStatus(msg.msg_id(), im::MessageStatus::SENT);
 
   resp.set_msg_id(msg.msg_id());

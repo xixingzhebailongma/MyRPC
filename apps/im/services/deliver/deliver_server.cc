@@ -2,6 +2,9 @@
 #include "Logger.h"
 #include "mq_constants.h"
 #include "rpc_protocol.h"
+#include "metrics_registry.h"
+#include "span_exporter.h"
+#include "span_id.h"
 #include <chrono>
 #include <memory>
 #include <thread>
@@ -12,6 +15,16 @@ constexpr int64_t kMinIdleMs = 30000; // 重试间隔：闲置 30s 仍没 ACK �
 constexpr int kMaxRetry = 3;          // 与旧 MAX_RETRY 一致
 constexpr int kRetryTtlSec = 3600;     // retry side key 的 TTL
 constexpr int kReclaimIntervalSec = 5; // 回收扫描周期
+
+// consume span 守卫：作用域退出时导出（覆盖 dedup/离线/推完各分支）。
+struct ConsumeSpanGuard {
+  Span span;
+  ~ConsumeSpanGuard() {
+    span.end_us = monotonicUs();
+    span.status = "OK";
+    SpanExporter::instance().exportSpan(span);
+  }
+};
 } // namespace
 
 DeliverServer::DeliverServer(const std::string &server_id, uint64_t worker_id,
@@ -91,6 +104,13 @@ void DeliverServer::onMessage(const std::string &entry_id,
     return;
   }
   // 幂等：已被 ACK 标记为已投递/已读 → 直接收尾
+  ConsumeSpanGuard guard;
+  guard.span.trace_id = msg.trace_id();
+  guard.span.parent_span_id = msg.span_id();
+  guard.span.span_id = generateSpanId();
+  guard.span.method = "consume";
+  guard.span.start_us = monotonicUs();
+
   im::MessageStatus st = message_store_.getStatus(msg.msg_id());
   if (st == im::MessageStatus::DELIVERED || st == im::MessageStatus::READ) {
     consumer_.ack(immq::kDeliveryStream, immq::kDeliveryGroup, entry_id);
@@ -111,7 +131,7 @@ void DeliverServer::onMessage(const std::string &entry_id,
                msg.to_user_id().c_str());
   std::string frame = chatFrame(msg);
   for (const auto &s : servers) {
-    pushToGateway(s, frame, msg.trace_id());
+    pushToGateway(s, frame, msg.trace_id(), guard.span.span_id);
   }
   // 推成功不 ACK：留在 PEL 等收件人 ACK，由 onReclaim 收尾
 }
@@ -130,6 +150,12 @@ void DeliverServer::onReclaim(const std::string &entry_id,
     consumer_.ack(immq::kDeliveryStream, immq::kDeliveryGroup, entry_id);
     return;
   }
+  ConsumeSpanGuard guard;
+  guard.span.trace_id = msg.trace_id();
+  guard.span.parent_span_id = msg.span_id();
+  guard.span.span_id = generateSpanId();
+  guard.span.method = "consume";
+  guard.span.start_us = monotonicUs();
   int64_t retries = message_store_.incrementRetryCount(entry_id, kRetryTtlSec);
   if (retries > kMaxRetry) {
     // 超过最大重试 → 转离线收尾
@@ -147,7 +173,7 @@ void DeliverServer::onReclaim(const std::string &entry_id,
   }
   std::string frame = chatFrame(msg);
   for (const auto &s : servers) {
-    pushToGateway(s, frame, msg.trace_id());
+    pushToGateway(s, frame, msg.trace_id(), guard.span.span_id);
   }
   // 不 ACK：继续留 PEL，等 ACK 或下一轮回收
 }
@@ -184,7 +210,8 @@ DeliverServer::queryUserRoute(const std::string &user_id) {
 
 bool DeliverServer::pushToGateway(const im::RouteServer &server,
                                   const std::string &frame,
-                                  const std::string &trace_id) {
+                                  const std::string &trace_id,
+                                  const std::string &span_id) {
   auto ch = gateway_channels_.getOrCreate(
       server.server_id(), server.server_ip(),
       static_cast<uint16_t>(server.server_port()));
@@ -196,7 +223,7 @@ bool DeliverServer::pushToGateway(const im::RouteServer &server,
   std::string resp_body;
   int32_t err = 0;
   return ch->Call("GatewayService", "Push", req_body, resp_body, err, -1, "",
-                  trace_id);
+                  trace_id, span_id);
 }
 
 std::string DeliverServer::chatFrame(const im::ChatMessage &msg) {
