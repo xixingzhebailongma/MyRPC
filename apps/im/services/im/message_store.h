@@ -1,6 +1,7 @@
 #pragma once
 #include "im.pb.h"
 #include "redis_client.h"
+#include "snowflake_id.h"
 #include <atomic>
 #include <cstdint>
 #include <mutex>
@@ -13,7 +14,8 @@ public:
   static constexpr int kRequestDedupTtlSec =
       120; // 幂等去重键 TTL：覆盖重试窗口
 
-  explicit MessageStore(const std::string &server_id, uint64_t worker_id);
+  explicit MessageStore(const std::string &server_id, uint64_t worker_id,
+                        bool enable_snowflake = true);
 
   //连接Redis
   bool connect(const std::string &redis_ip, int redis_port);
@@ -59,24 +61,14 @@ private:
   RedisClient redis_;
   std::string server_id_;
   // ===== Snowflake 64-bit ID 生成 =====
-  // [1 位符号=0][41 位毫秒时间戳][10 位 worker_id][12 位毫秒内序列]
+  // 位布局/回拨策略/持久化钩子已下沉到 SnowflakeIdGenerator；
   // worker_id 仅为唯一性，绝不从 msg_id 反解，因此 ID 与节点身份解耦。
-  static constexpr uint64_t kEpochMs =
-      1577836800000ULL; // 2020-01-01 00:00:00 UTC
-  static constexpr uint64_t kWorkerIdBits = 10;
-  static constexpr uint64_t kSequenceBits = 12;
-  static constexpr uint64_t kMaxWorkerId = (1ULL << kWorkerIdBits) - 1;  // 1023
-  static constexpr uint64_t kSequenceMask = (1ULL << kSequenceBits) - 1; // 4095
-  static constexpr uint64_t kWorkerIdShift = kSequenceBits;              // 12
-  static constexpr uint64_t kTimestampShift =
-      kWorkerIdBits + kSequenceBits; // 22
+  SnowflakeIdGenerator gen_;
 
-  uint64_t worker_id_;
-  std::mutex id_mutex_; // 保护 last_timestamp_ms_ + sequence_
-  uint64_t last_timestamp_ms_{0};
-  uint64_t sequence_{0};
-
-  uint64_t nowMs() const;
+  // 初始化 Snowflake 逻辑时钟（启动时从 Redis 读历史最大时间戳 seed，只执行一次）
+  std::once_flag snowflake_init_once_;
+  bool snowflake_enabled_;
+  bool initSnowflakeState();
 
   // Redis Key 构造辅助方法
   std::string requestKey(const std::string &from_user_id,
@@ -85,4 +77,5 @@ private:
   retryKey(const std::string &entry_id) const; // "msg:retry:" + entry_id
   std::string offlineKey(const std::string &user_id) const;
   std::string statusKey(const std::string &msg_id) const;
+  std::string snowflakeKey() const; // "snowflake:last_ts:" + worker_id
 };

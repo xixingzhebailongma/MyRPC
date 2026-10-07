@@ -102,6 +102,7 @@ target_link_libraries(db
 # ====== message_store 静态库 ======
 add_library(message_store STATIC
     services/im/message_store.cc
+    services/im/snowflake_id.cc
 )
 target_include_directories(message_store PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/services/im ${CMAKE_CURRENT_SOURCE_DIR}/common/mq)
 target_link_libraries(message_store

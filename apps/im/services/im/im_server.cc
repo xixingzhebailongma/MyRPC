@@ -329,11 +329,11 @@ std::string ImServer::handleSendMessage(spConnection conn,
   ChatMessage msg = req.msg();
   msg.set_from_user_id(uid); // 客户端自报的 from_user_id 一律忽略
 
-  //真实 msg_id 始终由服务端生成（全局唯一：INCR 单调 + server_id 前缀）
+  //真实 msg_id 始终由服务端生成（Snowflake，全局唯一）
   std::string real_msg_id = message_store_.generateMsgId();
   if (real_msg_id.empty()) {
     resp.set_success(false);
-    resp.set_message("server error:failed to generate msg_id");
+    resp.set_message("server error: snowflake unavailable (clock rollback)");
     std::string out;
     resp.SerializeToString(&out);
     return out;

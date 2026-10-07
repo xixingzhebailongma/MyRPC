@@ -11,7 +11,7 @@ set(CMAKE_CXX_FLAGS_RELEASE "-O2 -DNDEBUG")
 
 # ===== Sanitizer 回归 =====
 # ASAN / TSAN 互斥，勿同时开启；UBSAN 可与 ASAN 叠加。
-# 用法：cmake -B build-asan -DENABLE_ASAN=ON && cmake --build build-asan && ctest --test-dir build-asan
+# 用法：cmake -B build/asan -DENABLE_ASAN=ON && cmake --build build/asan && ctest --test-dir build/asan
 option(ENABLE_ASAN "Enable AddressSanitizer" OFF)
 option(ENABLE_TSAN "Enable ThreadSanitizer" OFF)
 option(ENABLE_UBSAN "Enable UndefinedBehaviorSanitizer" OFF)

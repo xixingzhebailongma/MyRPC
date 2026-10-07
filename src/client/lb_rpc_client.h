@@ -47,8 +47,8 @@ public:
   pickNodeExcept(const std::unordered_set<std::string> &exclude);
 
 private:
-  //从etcd刷新节点列表
-  void refreshNodes();
+  // 处理 watch 推送的节点变化（增量 Add/Remove 或全量 ReplaceAll）
+  void onNodeEvent(const ServiceNodeEvent &e);
   // 替换节点列表并重建 balancer 内部状态（一致性哈希 ring 等）
   // 前提：调用前必须已持有 mutex_
   void applyNodes(std::vector<ServiceNode> newNodes);

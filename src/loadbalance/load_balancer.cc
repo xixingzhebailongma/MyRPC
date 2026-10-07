@@ -50,16 +50,17 @@ ConsistentHashBalancer::select(size_t nodeCount, const std::string &key,
     first = ring_.begin();
   return first->second % nodeCount;
 }
-//重建hash ring
+//重建hash ring：先构建新环到局部 map，再一次 swap，避免中间态（半成品环）
 void ConsistentHashBalancer::rebuild(const std::vector<std::string> &nodeIds) {
-  ring_.clear();
+  std::map<uint32_t, size_t> ring;
   for (size_t i = 0; i < nodeIds.size(); ++i) {
     for (int v = 0; v < virtual_nodes_; ++v) {
       std::string vnode = nodeIds[i] + "_vnode_" + std::to_string(v);
       uint32_t hash = hasher_(vnode);
-      ring_[hash] = i;
+      ring[hash] = i;
     }
   }
+  ring_.swap(ring);
 }
 
 //轮询：节点列表变化时重置计数器

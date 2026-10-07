@@ -58,8 +58,8 @@ private:
     ResponseCallback cb;
   };
 
-  void refreshNodes();
   void applyNodes(std::vector<ServiceNode> newNodes);
+  void onNodeEvent(const ServiceNodeEvent &e);
   std::optional<ServiceNode>
   pickNodeForAsync(const std::unordered_set<std::string> &tried,
                    const std::string *key);

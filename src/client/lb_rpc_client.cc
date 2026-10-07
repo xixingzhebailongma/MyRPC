@@ -5,6 +5,7 @@
 #include "rpc_error_code.h"
 #include "service_discovery.h"
 #include "uuid.h"
+#include <algorithm>
 #include <mutex>
 #include <string>
 #include <unordered_set>
@@ -16,30 +17,46 @@ LbRpcClient::LbRpcClient(const std::string &etcdEndpoints,
     : discovery_(std::make_shared<ServiceDiscovery>(etcdEndpoints)),
       balancer_(std::move(balancer)), serviceName_(serviceName), cfg_(cfg),
       channel_pool_(cfg) {
-  refreshNodes();
-  LOG_INFO("LbRpcClient: initialized for service=%s, found %zu nodes",
-           serviceName_.c_str(), nodes_.size());
+  // 节点表由 watch 首轮 Resync 同步；首调若早于 Resync 落地，走 pick/Call
+  // 路径的懒 discover 兜底，所以这里不再同步全量 refreshNodes。
+  LOG_INFO("LbRpcClient: initialized for service=%s (nodes synced via watch)",
+           serviceName_.c_str());
 
-  // etcd watch：节点上下线立刻感知 -> 立即 rebuild 哈希环。
-  // watch 流断开后 EtcdClient 会自动重连，且每次重连成功都会再回调一次，
-  // 触发全量重拉补齐断连期间丢失的事件，因此无需额外的定时轮询兜底。
-  discovery_->watch(serviceName_, [this]() {
-    LOG_INFO("LbRpcClient: etcd watch triggered, refreshing %s",
-             serviceName_.c_str());
-    refreshNodes();
+  // etcd watch：节点上下线以增量 Add/Remove 应用，只在首连/compacted/断连过久
+  // 时投递一次 ReplaceAll（全量）。无需定时轮询兜底。
+  discovery_->watch(serviceName_, [this](const ServiceNodeEvent &e) {
+    onNodeEvent(e);
   });
 }
-void LbRpcClient::refreshNodes() {
-  auto newNodes = discovery_->discover(serviceName_);
+// watch 推送的节点变化：增量应用 Add/Remove，全量 ReplaceAll 直接替换
+void LbRpcClient::onNodeEvent(const ServiceNodeEvent &e) {
   std::lock_guard<std::mutex> lock(mutex_);
-  if (!newNodes) {
-    // 查询失败 ≠ 服务下线：保留上一次已知的节点表继续提供服务，
-    // 避免 etcd 瞬时抖动把哈希环清空、导致客户端集体失明。
-    LOG_WARN("LbRpcClient: discover %s failed, keeping %zu stale nodes",
-             serviceName_.c_str(), nodes_.size());
-    return;
+  std::vector<ServiceNode> updated = nodes_;
+  switch (e.type) {
+    case ServiceNodeEvent::Type::ReplaceAll:
+      updated = e.all;
+      break;
+    case ServiceNodeEvent::Type::Add: {
+      bool exists = false;
+      for (const auto &n : updated) {
+        if (n.address() == e.node.address()) {
+          exists = true;
+          break;
+        }
+      }
+      if (!exists)
+        updated.push_back(e.node);
+      break;
+    }
+    case ServiceNodeEvent::Type::Remove:
+      updated.erase(std::remove_if(updated.begin(), updated.end(),
+                                   [&](const ServiceNode &n) {
+                                     return n.address() == e.address;
+                                   }),
+                    updated.end());
+      break;
   }
-  applyNodes(std::move(*newNodes));
+  applyNodes(std::move(updated));
 }
 // 替换节点列表并通知 balancer 重建内部状态（一致性哈希 ring 等）
 // 前提：调用前必须已持有 mutex_
@@ -138,7 +155,11 @@ bool LbRpcClient::CallImpl(const std::string &methodName,
     {
       std::lock_guard<std::mutex> lock(mutex_);
 
-      // 无节点时，尝试从 etcd 刷新
+      // 无节点时，尝试从 etcd 刷新（首调可能早于 watch 首轮 Resync，兜底）
+      if (nodes_.empty()) {
+        if (auto newNodes = discovery_->discover(serviceName_))
+          applyNodes(std::move(*newNodes));
+      }
       if (nodes_.empty()) {
         LOG_ERROR("LbRpcClient: no available nodes for %s",
                   serviceName_.c_str());

@@ -3,6 +3,7 @@
 #include "async_rpc_channel.h"
 #include "rpc_error_code.h"
 #include "uuid.h"
+#include <algorithm>
 
 AsyncLbRpcClient::AsyncLbRpcClient(const std::string &etcdEndpoints,
                                    const std::string &serviceName,
@@ -11,28 +12,48 @@ AsyncLbRpcClient::AsyncLbRpcClient(const std::string &etcdEndpoints,
     : discovery_(std::make_shared<ServiceDiscovery>(etcdEndpoints)),
       balancer_(std::move(balancer)), serviceName_(serviceName), cfg_(cfg),
       client_(0, cfg) {
-  refreshNodes();
-  LOG_INFO("AsyncLbRpcClient: initialized for service=%s, found %zu nodes",
-           serviceName_.c_str(), nodes_.size());
+  // 节点表由 watch 首轮 Resync 同步；首调若早于 Resync 落地，走 pick 路径的
+  // 懒 discover 兜底，所以这里不再同步全量 refreshNodes。
+  LOG_INFO("AsyncLbRpcClient: initialized for service=%s (nodes synced via watch)",
+           serviceName_.c_str());
 
-  discovery_->watch(serviceName_, [this]() {
-    LOG_INFO("AsyncLbRpcClient: etcd watch triggered, refreshing %s",
-             serviceName_.c_str());
-    refreshNodes();
+  // etcd watch：节点上下线以增量 Add/Remove 应用，只在首连/compacted/断连过久
+  // 时投递一次 ReplaceAll（全量）。
+  discovery_->watch(serviceName_, [this](const ServiceNodeEvent &e) {
+    onNodeEvent(e);
   });
 }
 
 AsyncLbRpcClient::~AsyncLbRpcClient() { discovery_->stopWatch(); }
 
-void AsyncLbRpcClient::refreshNodes() {
-  auto newNodes = discovery_->discover(serviceName_);
+void AsyncLbRpcClient::onNodeEvent(const ServiceNodeEvent &e) {
   std::lock_guard<std::mutex> lock(mutex_);
-  if (!newNodes) {
-    LOG_WARN("AsyncLbRpcClient: discover %s failed, keeping %zu stale nodes",
-             serviceName_.c_str(), nodes_.size());
-    return;
+  std::vector<ServiceNode> updated = nodes_;
+  switch (e.type) {
+    case ServiceNodeEvent::Type::ReplaceAll:
+      updated = e.all;
+      break;
+    case ServiceNodeEvent::Type::Add: {
+      bool exists = false;
+      for (const auto &n : updated) {
+        if (n.address() == e.node.address()) {
+          exists = true;
+          break;
+        }
+      }
+      if (!exists)
+        updated.push_back(e.node);
+      break;
+    }
+    case ServiceNodeEvent::Type::Remove:
+      updated.erase(std::remove_if(updated.begin(), updated.end(),
+                                   [&](const ServiceNode &n) {
+                                     return n.address() == e.address;
+                                   }),
+                    updated.end());
+      break;
   }
-  applyNodes(std::move(*newNodes));
+  applyNodes(std::move(updated));
 }
 
 void AsyncLbRpcClient::applyNodes(std::vector<ServiceNode> newNodes) {

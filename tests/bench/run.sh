@@ -7,7 +7,7 @@
 #   RUN_CTEST=0 ./tests/bench/run.sh      # 只跑压测，跳过功能回归
 #
 # 可用环境变量：
-#   BUILD_DIR    构建目录（默认 build-bench，独立于日常 Debug 的 build/）
+#   BUILD_DIR    构建目录（默认 build/bench，独立于日常 Debug 的 build/default/）
 #   BUILD_TYPE   构建类型（默认 Release；压测务必 Release，Debug 数字无参考意义）
 #   DURATION     每档压测时长，秒（默认 3）
 #   RUN_CTEST    是否跑功能回归（默认 1）
@@ -17,7 +17,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT"
 
-BUILD_DIR="${BUILD_DIR:-build-bench}"
+BUILD_DIR="${BUILD_DIR:-build/bench}"
 BUILD_TYPE="${BUILD_TYPE:-Release}"
 DURATION="${DURATION:-3}"
 RUN_CTEST="${RUN_CTEST:-1}"

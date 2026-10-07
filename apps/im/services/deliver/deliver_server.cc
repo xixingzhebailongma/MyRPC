@@ -19,7 +19,7 @@ DeliverServer::DeliverServer(const std::string &server_id, uint64_t worker_id,
                              const std::string &etcd_endpoints,
                              const std::string &redis_ip, int redis_port,
                              const std::string &consumer_name)
-    : message_store_(server_id, worker_id),
+    : message_store_(server_id, worker_id, /*enable_snowflake=*/false),
       route_client_(etcd_endpoints, route_service,
                     std::make_shared<ConsistentHashBalancer>(150)),
       consumer_name_(consumer_name), redis_ip_(redis_ip),

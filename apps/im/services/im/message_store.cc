@@ -5,6 +5,8 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <exception>
+#include <mutex>
 #include <string>
 #include <utility>
 #include <vector>
@@ -27,8 +29,8 @@
   │ pendingRecordKey │ msg:pending:rec:{server_id}:{msg_id} │ String │ 序列化的
   PendingMessageRecord 详情                              │
   ├──────────────────┼──────────────────────────────────────┼────────┼─────────────────────────────────────────────────────────────────┤
-  │ kIdCounterKey    │ msg:id:counter                       │ String │ 全局 ID
-  计数器  */
+  │ snowflakeKey     │ snowflake:last_ts:{worker_id}       │ String │ Snowflake
+  最大时间戳（新毫秒发号前同步 SET）  */
 std::string
 MessageStore::requestKey(const std::string &from_user_id,
                          const std::string &client_request_id) const {
@@ -46,19 +48,39 @@ std::string MessageStore::statusKey(const std::string &msg_id) const {
 }
 
 // ========== 构造 & 连接 ==========
-MessageStore::MessageStore(const std::string &server_id, uint64_t worker_id)
-    : server_id_(server_id), worker_id_(worker_id & kMaxWorkerId) {}
+MessageStore::MessageStore(const std::string &server_id, uint64_t worker_id,
+                           bool enable_snowflake)
+    : server_id_(server_id), gen_(worker_id),
+      snowflake_enabled_(enable_snowflake) {
+  // 新毫秒发号前同步持久化最大时间戳；RedisClient 内部 4 连接池、acquire 有互斥，跨线程安全。
+  gen_.SetPersistFn([this](uint64_t ts) {
+    return redis_.set(snowflakeKey(), std::to_string(ts));
+  });
+}
 
 bool MessageStore::connect(const std::string &redis_ip, int redis_port) {
   bool ok = redis_.connect(redis_ip, redis_port);
   if (!ok) {
     LOG_ERROR("MessageStore: failed to connect to Redis at %s:%d",
               redis_ip.c_str(), redis_port);
-  } else {
-    LOG_INFO("MessageStore: connected to Redis at %s:%d", redis_ip.c_str(),
-             redis_port);
+    return false;
   }
-  return ok;
+  LOG_INFO("MessageStore: connected to Redis at %s:%d", redis_ip.c_str(),
+           redis_port);
+
+  // 仅发号方（im_server）初始化 Snowflake 逻辑时钟；deliver_server 等不发号方跳过，
+  // 避免污染 snowflake:last_ts:{worker_id} 的首次部署判定。
+  if (snowflake_enabled_) {
+    // 初始化 Snowflake 逻辑时钟（只执行一次）；失败则拒绝启动，避免重启后产生重复 ID
+    bool inited = false;
+    std::call_once(snowflake_init_once_,
+                   [&] { inited = initSnowflakeState(); });
+    if (!inited) {
+      LOG_ERROR("MessageStore: snowflake state init failed, refusing to start");
+      return false;
+    }
+  }
+  return true;
 }
 
 //========== 去重 ==========
@@ -160,39 +182,60 @@ im::MessageStatus MessageStore::getStatus(const std::string &msg_id) {
 
 // ========== ID 生成 ==========
 
-uint64_t MessageStore::nowMs() const {
-  return static_cast<uint64_t>(
+std::string MessageStore::snowflakeKey() const {
+  return "snowflake:last_ts:" + std::to_string(gen_.WorkerId());
+}
+
+// 启动时从 Redis 读历史最大时间戳 seed 逻辑时钟。
+// 核心原则：拿不到可信历史最大时间戳就不发号（返回 false 拒绝启动），避免重启后产生重复 ID。
+bool MessageStore::initSnowflakeState() {
+  std::string key = snowflakeKey();
+  uint64_t now = static_cast<uint64_t>(
       std::chrono::duration_cast<std::chrono::milliseconds>(
           std::chrono::system_clock::now().time_since_epoch())
           .count());
-}
 
-std::string MessageStore::generateMsgId() {
-  std::lock_guard<std::mutex> lock(id_mutex_);
-  uint64_t now = nowMs();
-
-  // 时钟回拨保护：等待系统时间追平上一次生成时间戳，避免产生重复 ID
-  while (now < last_timestamp_ms_) {
-    now = nowMs();
-  }
-
-  if (now == last_timestamp_ms_) {
-    sequence_ = (sequence_ + 1) & kSequenceMask;
-    if (sequence_ == 0) {
-      // 同一毫秒内序列耗尽（>4096/ms），自旋等到下一毫秒
-      do {
-        now = nowMs();
-      } while (now <= last_timestamp_ms_);
+  std::string v = redis_.get(key);
+  if (!v.empty()) {
+    uint64_t persisted = 0;
+    try {
+      persisted = std::stoull(v);
+    } catch (const std::exception &) {
+      LOG_ERROR("MessageStore: invalid snowflake last_ts '%s'", v.c_str());
+      return false;
     }
-  } else {
-    sequence_ = 0;
+    // 防止 worker_id 复用导致时间戳虚高：persisted 远超当前时间（>1 天）时拒绝启动，
+    // 需人工确认（清/改 snowflake:last_ts:{worker_id} 后再启动），避免长期等待/故障。
+    constexpr uint64_t kMaxForwardDriftMs = 86400000ULL; // 1 天
+    if (persisted > now + kMaxForwardDriftMs) {
+      LOG_ERROR("MessageStore: snowflake last_ts %llu is %llums ahead of now %llu (worker_id possibly reused); refusing to start, manual confirmation required",
+                static_cast<unsigned long long>(persisted),
+                static_cast<unsigned long long>(persisted - now),
+                static_cast<unsigned long long>(now));
+      return false;
+    }
+    // seed = max(now, persisted + 1)：跳过可能已部分使用的毫秒
+    uint64_t seed = std::max(now, persisted + 1);
+    gen_.SetLastTimestampMs(seed);
+    if (persisted >= now) {
+      LOG_WARN("MessageStore: snowflake clock rollback on startup: persisted=%llu now=%llu seed=%llu",
+               static_cast<unsigned long long>(persisted),
+               static_cast<unsigned long long>(now),
+               static_cast<unsigned long long>(seed));
+    }
+    return true;
   }
-  last_timestamp_ms_ = now;
 
-  uint64_t id = ((now - kEpochMs) << kTimestampShift) |
-                ((worker_id_ & kMaxWorkerId) << kWorkerIdShift) | sequence_;
-  return std::to_string(id);
+  // key 缺失：用 setnx 区分「首次部署」与「key 已存在但 GET 异常」
+  if (redis_.setnx(key, std::to_string(now))) {
+    gen_.SetLastTimestampMs(now);
+    return true;
+  }
+  LOG_ERROR("MessageStore: snowflake last_ts key exists but could not be read, refusing to start");
+  return false;
 }
+
+std::string MessageStore::generateMsgId() { return gen_.Next(); }
 
 // ========== 重试计数（deliver_server 用，key 按 stream entry_id 隔离）
 // ==========

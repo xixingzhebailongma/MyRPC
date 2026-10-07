@@ -1,5 +1,5 @@
-# CMake 构建目录：每个配置一个独立目录（build/、build-asan/、build-tsan/、
-# build-ubsan/、build-bench/ 等），统一用 build*/ 忽略，避免逐个枚举。
+# CMake 构建目录：全部收在 build/ 下（build/default、build/asan、build/tsan、
+# build/ubsan、build/bench），统一用 build*/ 忽略，避免逐个枚举。
 build*/
 .cache/
 **/.clangd
@@ -26,3 +26,9 @@ a.out
 *.o
 *.a
 *.so
+
+# 文档 / Markdown：不纳入版本控制
+*.md
+
+# 测试代码：不纳入版本控制
+tests/

@@ -80,6 +80,11 @@ target_link_libraries(test_idempotency_redis
     PRIVATE idempotency_redis
     PRIVATE Threads::Threads
 )
+add_executable(test_snowflake_id unit/test_snowflake_id.cc)
+target_link_libraries(test_snowflake_id
+    PRIVATE message_store
+    PRIVATE Threads::Threads
+)
 add_executable(test_async_rpc_client unit/test_async_rpc_client.cc)
 target_link_libraries(test_async_rpc_client
     PRIVATE rpc_async_client
@@ -123,6 +128,16 @@ target_link_libraries(test_rpc_lb_failover_etcd
     PRIVATE Threads::Threads
 )
 
+# ---- watch 增量/续传/compacted/断连阈值（自管一个独立 etcd 实例）----
+add_executable(test_watch_incremental unit/test_watch_incremental.cc)
+target_link_libraries(test_watch_incremental
+    PRIVATE rpc_server
+    PRIVATE lb_rpc_client
+    PRIVATE registry
+    PRIVATE load_balancer
+    PRIVATE Threads::Threads
+)
+
 # ---- TLS 握手端到端：spawn gateway_server（客户端侧 TLS） + ImClientConn ----
 add_executable(test_gateway_tls unit/test_gateway_tls.cc)
 target_include_directories(test_gateway_tls PRIVATE ${CMAKE_SOURCE_DIR}/apps/im/client)
@@ -152,12 +167,14 @@ add_test(NAME test_rpc_channel_heartbeat COMMAND test_rpc_channel_heartbeat)
 add_test(NAME test_rpc_channel_metrics COMMAND test_rpc_channel_metrics)
 add_test(NAME test_idempotency_lru COMMAND test_idempotency_lru)
 add_test(NAME test_idempotency_redis COMMAND test_idempotency_redis)
+add_test(NAME test_snowflake_id COMMAND test_snowflake_id)
 add_test(NAME test_async_rpc_client COMMAND test_async_rpc_client)
 add_test(NAME test_async_lb_rpc_client COMMAND test_async_lb_rpc_client)
 add_test(NAME test_rpc_server_e2e COMMAND test_rpc_server_e2e)
 add_test(NAME test_rpc_server_concurrency COMMAND test_rpc_server_concurrency)
 add_test(NAME test_rpc_server_idempotency COMMAND test_rpc_server_idempotency)
 add_test(NAME test_rpc_lb_failover_etcd COMMAND test_rpc_lb_failover_etcd)
+add_test(NAME test_watch_incremental COMMAND test_watch_incremental)
 add_test(NAME test_gateway_tls COMMAND test_gateway_tls)
 
 # ---- IM 全链路 E2E：spawn route/auth/im/gateway/deliver + ImClientConn ----

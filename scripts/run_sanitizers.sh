@@ -19,7 +19,7 @@ case "$SAN" in
 esac
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-BUILD="$ROOT/build-$SAN"
+BUILD="$ROOT/build/$SAN"
 
 echo "==> 配置 $SAN 到 $BUILD"
 cmake -S "$ROOT" -B "$BUILD" "$FLAG" -DCMAKE_BUILD_TYPE=Debug

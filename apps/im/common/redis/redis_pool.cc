@@ -93,14 +93,27 @@ void RedisPool::release(ConnPtr conn, bool broken) {
 }
 
 RedisPool::ConnPtr RedisPool::dial() {
-  redisContext *ctx = redisConnect(ip_.c_str(), port_);
+  // 连接 + 命令 I/O 超时：避免网络故障（主机不可达 / 连接挂死）长时间阻塞同步调用方
+  // （如 Snowflake 发号线程）。2s 需大于 stream 订阅的 BLOCK 500ms，不打断 XREADGROUP。
+  struct timeval tv;
+  tv.tv_sec = 2;
+  tv.tv_usec = 0;
+
+  redisContext *ctx = redisConnectWithTimeout(ip_.c_str(), port_, tv);
   if (ctx == nullptr) {
     LOG_ERROR("RedisPool::dial: redisConnect failed (null)");
     return nullptr;
   }
-  if (ctx->err != 0) { // 连接被拒等：返回非空但 err != 0
+  if (ctx->err != 0) { // 连接被拒 / 超时等：返回非空但 err != 0
     LOG_ERROR("RedisPool::dial: redisConnect to %s:%d failed: %s", ip_.c_str(),
               port_, ctx->errstr);
+    redisFree(ctx);
+    return nullptr;
+  }
+  // 命令 I/O 超时：挂死连接上的阻塞读/写会在此超时并标记 broken，走重连路径。
+  if (redisSetTimeout(ctx, tv) != REDIS_OK) {
+    LOG_ERROR("RedisPool::dial: redisSetTimeout to %s:%d failed", ip_.c_str(),
+              port_);
     redisFree(ctx);
     return nullptr;
   }
