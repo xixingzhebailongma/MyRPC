@@ -33,6 +33,7 @@ syntax = "proto3";
       int64  timestamp = 13;      // 秒级 unix，Gateway 每条请求重填
       string nonce     = 14;      // Gateway 每条请求生成的随机 nonce（防重放）
       string signature = 15;      // HMAC-SHA256 hex，IM 验证
+      string trace_id = 16;       // 端到端关联 ID：客户端优先生成，网关兜底，下游只透传
     } 
 
   message RpcMessage {

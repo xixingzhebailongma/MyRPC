@@ -340,6 +340,7 @@ std::string ImServer::handleSendMessage(spConnection conn,
   }
   msg.set_msg_id(real_msg_id);
   msg.set_status(im::MessageStatus::SENT);
+  msg.set_trace_id(hdr.trace_id()); // 随消息经 Redis Stream 透传到 deliver
 
   //幂等去重：按 (发送者, client_request_id) 隔离
   const std::string &client_request_id = req.client_request_id();
@@ -374,8 +375,10 @@ std::string ImServer::handleSendMessage(spConnection conn,
     // 入队失败 = 消息真正丢失：回滚去重键，允许客户端重试重投
     if (!client_request_id.empty()) {
       message_store_.releaseRequestClaim(uid, client_request_id);
-      LOG_ERROR("handleSendMessage: enqueue failed, released claim for user=%s",
-                uid.c_str());
+      LOG_ERROR("handleSendMessage: enqueue failed, released claim for user=%s "
+                "trace_id=%s",
+                uid.c_str(),
+                hdr.trace_id().empty() ? "-" : hdr.trace_id().c_str());
     }
     resp.set_success(false);
     resp.set_message("enqueue failed");

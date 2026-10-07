@@ -44,6 +44,7 @@ package im;
      int64 timestamp = 6;
      int32 chat_type = 7;      // 0=单聊, 1=群聊
      MessageStatus status = 8;
+     string trace_id = 9;    // 端到端关联 ID，随消息经 Redis Stream 透传到 deliver
  }
 
  //新增ACK消息

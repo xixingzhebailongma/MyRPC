@@ -288,11 +288,15 @@ bool RpcChannel::Call(const std::string &service_name,
                       const std::string &method_name,
                       const std::string &request_body,
                       std::string &response_body, int32_t &error_code,
-                      int timeout_ms, const std::string &request_id) {
+                      int timeout_ms, const std::string &request_id,
+                      const std::string &trace_id) {
   // seq 占位传 0，由 callImpl 统一覆盖
   RpcMessage request = buildRequest(service_name, method_name, 0, request_body);
   if (!request_id.empty()) {
     request.mutable_header()->set_request_id(request_id);
+  }
+  if (!trace_id.empty()) {
+    request.mutable_header()->set_trace_id(trace_id);
   }
   return callImpl(request, response_body, error_code, timeout_ms);
 }

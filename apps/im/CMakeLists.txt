@@ -172,7 +172,7 @@ target_link_libraries(deliver_server
 add_library(im_client_conn STATIC
     client/im_client_conn.cc
 )
-target_include_directories(im_client_conn PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/client)
+target_include_directories(im_client_conn PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/client ${CMAKE_SOURCE_DIR}/src/client)
 target_link_libraries(im_client_conn PUBLIC protocol OpenSSL::SSL)
 
 # ====== IM 测试客户端 ======

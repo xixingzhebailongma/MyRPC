@@ -104,9 +104,12 @@ void DeliverServer::onMessage(const std::string &entry_id,
     consumer_.ack(immq::kDeliveryStream, immq::kDeliveryGroup, entry_id);
     return;
   }
+  LOG_INFO("DeliverServer: deliver msg_id=%s to_user=%s trace_id=%s",
+           msg.msg_id().c_str(), msg.to_user_id().c_str(),
+           msg.trace_id().empty() ? "-" : msg.trace_id().c_str());
   std::string frame = chatFrame(msg);
   for (const auto &s : servers) {
-    pushToGateway(s, frame);
+    pushToGateway(s, frame, msg.trace_id());
   }
   // 推成功不 ACK：留在 PEL 等收件人 ACK，由 onReclaim 收尾
 }
@@ -142,7 +145,7 @@ void DeliverServer::onReclaim(const std::string &entry_id,
   }
   std::string frame = chatFrame(msg);
   for (const auto &s : servers) {
-    pushToGateway(s, frame);
+    pushToGateway(s, frame, msg.trace_id());
   }
   // 不 ACK：继续留 PEL，等 ACK 或下一轮回收
 }
@@ -178,7 +181,8 @@ DeliverServer::queryUserRoute(const std::string &user_id) {
 }
 
 bool DeliverServer::pushToGateway(const im::RouteServer &server,
-                                  const std::string &frame) {
+                                  const std::string &frame,
+                                  const std::string &trace_id) {
   auto ch = gateway_channels_.getOrCreate(
       server.server_id(), server.server_ip(),
       static_cast<uint16_t>(server.server_port()));
@@ -189,7 +193,8 @@ bool DeliverServer::pushToGateway(const im::RouteServer &server,
   std::string req_body = req.SerializeAsString();
   std::string resp_body;
   int32_t err = 0;
-  return ch->Call("GatewayService", "Push", req_body, resp_body, err);
+  return ch->Call("GatewayService", "Push", req_body, resp_body, err, -1, "",
+                  trace_id);
 }
 
 std::string DeliverServer::chatFrame(const im::ChatMessage &msg) {

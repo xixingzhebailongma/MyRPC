@@ -1,5 +1,6 @@
 #include "im_client_conn.h"
 #include "rpc_protocol.h"
+#include "uuid.h"
 #include <arpa/inet.h>
 #include <cerrno>
 #include <chrono>
@@ -284,6 +285,10 @@ std::string ImClientConn::call(const std::string &service_name,
 
   uint64_t seq = next_seq_.fetch_add(1);
   RpcMessage req = buildRequest(service_name, method_name, seq, request_body);
+  // trace_id 客户端优先生成（网关兜底）；判空，避免无条件覆盖。
+  if (req.header().trace_id().empty()) {
+    req.mutable_header()->set_trace_id(generateUuid());
+  }
   std::string wire = encodeMessage(req);
   {
     // 整帧原子发送。少了这把锁，两个线程的帧会在 socket 上交错，

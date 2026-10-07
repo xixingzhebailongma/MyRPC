@@ -47,7 +47,8 @@ public:
   bool Call(const std::string &service_name, const std::string &method_name,
             const std::string &request_body, std::string &response_body,
             int32_t &error_code, int timeout_ms = -1,
-            const std::string &request_id = "");
+            const std::string &request_id = "",
+            const std::string &trace_id = "");
 
   // 发送调用方预构造的 RpcMessage（Gateway 用来注入 header 字段）。
   // 只覆盖 sequence_id 为自增 seq，其余字段（service/method/gateway_id

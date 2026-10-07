@@ -4,6 +4,7 @@
 #include "gateway_sign.h"
 #include "im.pb.h"
 #include "rpc_protocol.h"
+#include "uuid.h"
 #include <chrono>
 #include <cstdint>
 #include <ctime>
@@ -167,6 +168,10 @@ void GatewayServer::forwardToIm(uint64_t conn_id, std::string payload) {
   req.mutable_header()->set_client_ip(conn->ip());
   req.mutable_header()->set_gateway_rpc_ip(rpc_ip_);
   req.mutable_header()->set_gateway_rpc_port(rpc_port_);
+  // trace_id 兜底生成：客户端已带则不覆盖
+  if (req.mutable_header()->trace_id().empty()) {
+    req.mutable_header()->set_trace_id(generateUuid());
+  }
   uint64_t client_seq = req.header().sequence_id();
 
   // ===== 信任域入口：按连接认证状态分流 =====
@@ -237,9 +242,12 @@ void GatewayServer::forwardToIm(uint64_t conn_id, std::string payload) {
       break;
     }
 
-    LOG_WARN("Gateway forward fail: conn=%llu method=%s attempt=%d node=%s",
+    LOG_WARN("Gateway forward fail: conn=%llu method=%s attempt=%d node=%s "
+             "trace_id=%s",
              (unsigned long long)conn_id, method.c_str(), attempt,
-             addr.c_str());
+             addr.c_str(),
+             req.header().trace_id().empty() ? "-"
+                                             : req.header().trace_id().c_str());
 
     // 仅白名单方法在传输层失败时重试；重试前确认客户端连接还在
     if (!isRetryableMethod(method) || attempt >= kForwardMaxRetries ||
