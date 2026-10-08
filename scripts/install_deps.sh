@@ -24,7 +24,7 @@ sudo apt-get install -y --no-install-recommends \
   build-essential cmake git pkg-config curl ca-certificates \
   protobuf-compiler="${PROTOBUF_VER}" \
   libprotobuf-dev="${PROTOBUF_VER}" \
-  libgrpc-dev libgrpc++-dev protobuf-compiler-grpc="${GRPC_PLUGIN
+  libgrpc-dev libgrpc++-dev protobuf-compiler-grpc="${GRPC_PLUGIN_VER}" \
   libhiredis-dev="${HIREDIS_VER}" \
   libmysqlclient-dev="${MYSQLCLIENT_VER}" \
   libmysqlcppconn-dev="${MYSQLCPPCONN_VER}" \
@@ -37,7 +37,7 @@ ETCD_CPP_API_DIR="/tmp/myrpc-ci-deps/etcd-cpp-apiv3"
 if [ ! -f "${ETCD_CPP_API_DIR}/.built" ]; then
   rm -rf "${ETCD_CPP_API_DIR}"
   git clone --depth 1 --branch "${ETCD_CPP_API_TAG}" \
-    https://github.com/etcd-cpp-apiv3/etcd-cpp-apiv3.git "${ETCD_
+    https://github.com/etcd-cpp-apiv3/etcd-cpp-apiv3.git "${ETCD_CPP_API_DIR}"
   cmake -S "${ETCD_CPP_API_DIR}" -B "${ETCD_CPP_API_DIR}/build" \
     -DCMAKE_BUILD_TYPE=Release \
     -DBUILD_ETCD_TESTS=OFF \
@@ -51,9 +51,9 @@ fi
 ETCD_BIN_DIR="/tmp/myrpc-ci-etcd"
 if [ ! -x "${ETCD_BIN_DIR}/etcd" ]; then
   mkdir -p "${ETCD_BIN_DIR}"
-  curl -sSL "https://github.com/etcd-io/etcd/releases/download/${SION}-linux-amd64.tar.gz" \
+  curl -sSL "https://github.com/etcd-io/etcd/releases/download/${ETCD_VERSION}/etcd-${ETCD_VERSION}-linux-amd64.tar.gz" \
     -o "${ETCD_BIN_DIR}/etcd.tar.gz"
-  tar -xzf "${ETCD_BIN_DIR}/etcd.tar.gz" -C "${ETCD_BIN_DIR}" --s
+  tar -xzf "${ETCD_BIN_DIR}/etcd.tar.gz" -C "${ETCD_BIN_DIR}" --strip-components=1
   rm -f "${ETCD_BIN_DIR}/etcd.tar.gz"
 fi
 

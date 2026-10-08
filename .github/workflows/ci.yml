@@ -82,7 +82,7 @@ jobs:
       - name: 应用 MySQL schema（带重试等容器就绪）
         run: |
           for i in $(seq 1 30); do
-            mysql -h127.0.0.1 -uroot < apps/im/common/db/schema.sema ok"; exit 0; }
+            mysql -h127.0.0.1 -uroot < apps/im/common/db/schema.sql 2>/dev/null && { echo "schema ok"; exit 0; }
             sleep 2
           done
           echo "mysql 未就绪" >&2
@@ -109,4 +109,4 @@ jobs:
       - name: IM 端到端（e2e + business + multi-node，串行）
         env:
           SAN: ${{ matrix.san }}
-        run: ctest --test-dir "build/$SAN" --output-on-failure -Rs|test_im_multi_node'
+        run: ctest --test-dir "build/$SAN" --output-on-failure -R 'test_im_e2e|test_im_business|test_im_multi_node'
