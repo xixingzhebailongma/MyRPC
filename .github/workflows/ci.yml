@@ -107,7 +107,7 @@ jobs:
       - name: 单元测试（排除 3 个 IM E2E）
         env:
           SAN: ${{ matrix.san }}
-        run: ctest --test-dir "build/$SAN" --output-on-failure -E 'test_im_e2e|test_im_business|test_im_multi_node'
+        run: ctest --test-dir "build/$SAN" --output-on-failure --timeout 120 -E 'test_im_e2e|test_im_business|test_im_multi_node'
 
       - name: 清理 Redis 投递流
         run: redis-cli -p 6379 DEL im:delivery || true
@@ -115,4 +115,4 @@ jobs:
       - name: IM 端到端（e2e + business + multi-node，串行）
         env:
           SAN: ${{ matrix.san }}
-        run: ctest --test-dir "build/$SAN" --output-on-failure -R 'test_im_e2e|test_im_business|test_im_multi_node'
+        run: ctest --test-dir "build/$SAN" --output-on-failure --timeout 300 -R 'test_im_e2e|test_im_business|test_im_multi_node'
