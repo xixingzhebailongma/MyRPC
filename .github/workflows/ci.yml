@@ -36,11 +36,8 @@ jobs:
           ETCD_INITIAL_ADVERTISE_PEER_URLS: "http://127.0.0.1:2380"
           ETCD_INITIAL_CLUSTER: "default=http://127.0.0.1:2380"
           ETCD_INITIAL_CLUSTER_STATE: "new"
-        options: >-
-          --health-cmd "etcdctl endpoint health"
-          --health-interval 5s
-          --health-timeout 3s
-          --health-retries 20
+        # etcd 官方镜像（distroless）无 shell，跑不了 string 形式的 --health-cmd；
+        # 改为 runner 侧 curl /health 探活（见「等待 etcd 就绪」步骤）。
 
       redis:
         image: redis:7.2.5-alpine
@@ -78,6 +75,15 @@ jobs:
 
       - name: 安装依赖（版本钉死）
         run: ./scripts/install_deps.sh
+
+      - name: 等待 etcd 就绪
+        run: |
+          for i in $(seq 1 30); do
+            curl -s http://127.0.0.1:2379/health 2>/dev/null | grep -q true && { echo "etcd ready"; exit 0; }
+            sleep 2
+          done
+          echo "etcd 未就绪" >&2
+          exit 1
 
       - name: 应用 MySQL schema（带重试等容器就绪）
         run: |
