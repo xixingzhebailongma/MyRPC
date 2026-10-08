@@ -21,7 +21,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        san: [asan, tsan, ubsan]
+        # TSAN 不进 CI：系统 libgrpc / etcd-cpp-apiv3（未按 TSAN 构建）+ std::condition_variable
+        # wait 谓词会产生大量假阳性（已核实 test_watch_incremental 两侧同持一个 mutex 仍报 race，
+        # 且 ASan 无 use-after-free）。TSAN 改在本机跑：./scripts/run_sanitizers.sh tsan。
+        san: [asan, ubsan]
 
     services:
       etcd:
