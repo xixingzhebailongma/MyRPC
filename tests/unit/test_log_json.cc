@@ -5,9 +5,12 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <fstream>
 #include <iostream>
+#include <iterator>
 #include <sstream>
 #include <string>
+#include <unistd.h>
 
 static int fail(const char *msg) {
   std::fprintf(stderr, "FAILED: %s\n", msg);
@@ -31,6 +34,29 @@ static bool pythonJsonParses(const std::string &json) {
 }
 
 int main() {
+  // 0) service 未设置 → init 应打 WARN 到 stderr（"service name not set"）。
+  //    注意 init 里是 fprintf(stderr, …)（C stderr），不是 std::cerr，得重定向 fd 2。
+  {
+    char tmpl[] = "/tmp/test_log_json_stderr_XXXXXX";
+    int capfd = ::mkstemp(tmpl);
+    if (capfd < 0) return fail("mkstemp failed");
+    int saved = ::dup(STDERR_FILENO);
+    ::dup2(capfd, STDERR_FILENO);            // stderr → 临时文件
+    Logger::instance().init(LogLevel::INFO, "", /*console=*/false);
+    ::fflush(stderr);
+    ::dup2(saved, STDERR_FILENO);            // 还原
+    ::close(saved);
+
+    std::ifstream in(tmpl);
+    std::string cap((std::istreambuf_iterator<char>(in)),
+                    std::istreambuf_iterator<char>());
+    in.close();
+    ::close(capfd);
+    ::unlink(tmpl);
+    if (cap.find("service name not set") == std::string::npos)
+      return fail("service-not-set WARN not triggered");
+  }
+
   // 1) jsonEscape 各转义字符
   if (Logger::jsonEscape("a\"b") != "a\\\"b")
     return fail("quote escape");
