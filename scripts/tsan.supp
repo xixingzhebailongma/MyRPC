@@ -1,0 +1,7 @@
+# ThreadSanitizer 抑制：系统 libgrpc（未按 TSAN 构建）在 watch/连接生命周期中的
+# 已知竞态；这些竞态会级联成对用户代码（如 test_watch_incremental.cc 锁内读取）的
+# 误报。本项目自身代码仍受 race 检测。
+race:*grpc*
+race:*gpr_*
+race:*ares*
+mutex:*grpc*

@@ -1,0 +1,6 @@
+# LeakSanitizer 抑制：第三方库 gRPC 在进程退出时的已知「泄漏」。
+# gRPC 持有全局状态/缓存，按设计不调用 grpc_shutdown()，LSan 会误报。
+# 本项目自身代码不受此影响，仍受 leak 检测。
+leak:*grpc*
+leak:*gpr_*
+leak:*ares*

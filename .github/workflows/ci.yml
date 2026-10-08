@@ -65,6 +65,8 @@ jobs:
       RPC_TEST_ETCD_BIN: /tmp/myrpc-ci-etcd/etcd
       RPC_TEST_ETCDCTL_BIN: /tmp/myrpc-ci-etcd/etcdctl
       UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+      LSAN_OPTIONS: suppressions=${{ github.workspace }}/scripts/lsan.supp
+      TSAN_OPTIONS: suppressions=${{ github.workspace }}/scripts/tsan.supp
 
     steps:
       - uses: actions/checkout@v4
