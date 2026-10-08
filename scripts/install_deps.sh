@@ -11,9 +11,9 @@ set -euo pipefail
 # ---- 版本常量 ----
 PROTOBUF_VER="3.12.4-1ubuntu7.22.04.6"
 HIREDIS_VER="0.14.1-2"
-MYSQLCLIENT_VER="8.0.46-0ubuntu0.22.04.3"
 MYSQLCPPCONN_VER="1.1.12-4ubuntu2"   # 注意是 1.1.x legacy API，不是 8.x X DevAPI
-OPENSSL_VER="3.0.2-0ubuntu1.25"
+# libmysqlclient-dev / libssl-dev 不 `=` 钉：它们随 jammy 安全更新频繁 bump（runner 的 apt
+# 快照往往比本机旧一两个补丁），且 ABI 稳定、补丁版本对构建无影响，靠「锁 ubuntu-22.04」钉住即可。
 GRPC_PLUGIN_VER="1.30.2-3build6"
 ETCD_CPP_API_TAG="v0.15.3"
 ETCD_VERSION="v3.5.16"
@@ -26,9 +26,9 @@ sudo apt-get install -y --no-install-recommends \
   libprotobuf-dev="${PROTOBUF_VER}" \
   libgrpc-dev libgrpc++-dev protobuf-compiler-grpc="${GRPC_PLUGIN_VER}" \
   libhiredis-dev="${HIREDIS_VER}" \
-  libmysqlclient-dev="${MYSQLCLIENT_VER}" \
+  libmysqlclient-dev \
   libmysqlcppconn-dev="${MYSQLCPPCONN_VER}" \
-  libssl-dev="${OPENSSL_VER}" \
+  libssl-dev \
   zlib1g-dev libcpprest-dev libboost-all-dev \
   redis-tools default-mysql-client
 
