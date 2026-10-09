@@ -53,18 +53,24 @@ docker build --build-arg SERVICE_NAME=im_test_client -t myrpc-client:test -f doc
 
 # 4. 跑真实链路：register ta1/tb1 → login ta1 → send tb1
 echo "==> 跑真实链路 smoke（register/login/send）"
+set +e
 output=$(docker run --rm --network myrpc-net --entrypoint sh myrpc-client:test -c '
   /usr/local/bin/app register ta1 pass123 --server.ip=gateway --server.port=9000 &&
   /usr/local/bin/app register tb1 pass123 --server.ip=gateway --server.port=9000 &&
   /usr/local/bin/app login ta1 pass123 --server.ip=gateway --server.port=9000 &&
   /usr/local/bin/app send tb1 "hello-smoke" --server.ip=gateway --server.port=9000
-')
+' 2>&1)
+rc=$?
+set -e
 
+echo "client exit=$rc"
+echo "client output:"
 echo "$output"
 
 # 5. 校验 send 成功
-if ! echo "$output" | grep -qE 'send: success=(1|true)'; then
-  echo "!! smoke test 失败：send 未成功" >&2
+if [ "$rc" -ne 0 ] || ! echo "$output" | grep -qE 'send: success=(1|true)'; then
+  echo "!! smoke test 失败（exit=$rc）" >&2
+  docker compose ps
   docker compose logs --no-color
   exit 1
 fi
