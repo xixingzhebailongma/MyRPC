@@ -124,3 +124,14 @@ jobs:
         env:
           SAN: ${{ matrix.san }}
         run: ctest --test-dir "build/$SAN" --output-on-failure --timeout 300 -R 'test_im_e2e|test_im_business|test_im_multi_node'
+
+  # 容器化验证：构建五个服务镜像 + 跑 docker compose 端到端 smoke test。
+  # 未接 GHCR push / 服务器部署（最小可用，不做完整 CD）。
+  container:
+    name: 容器化（docker build + smoke test）
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: 构建镜像 + 端到端 smoke test
+        run: ./scripts/smoke_test.sh

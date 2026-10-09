@@ -1,0 +1,135 @@
+# MyRPC IM 最小容器化编排：一条 docker compose up 拉起五个服务 + etcd/Redis/MySQL。
+# 服务间经 etcd 发现；配置经 CLI flag（command）注入，复用各 *_main.cc 的现有解析。
+# 只对外暴露 gateway 客户端端口 9000（供 smoke test / 调试）。
+
+services:
+  etcd:
+    image: gcr.io/etcd-development/etcd:v3.5.16
+    environment:
+      ETCD_NAME: default
+      ETCD_LISTEN_CLIENT_URLS: "http://0.0.0.0:2379"
+      ETCD_ADVERTISE_CLIENT_URLS: "http://etcd:2379"
+      ETCD_LISTEN_PEER_URLS: "http://0.0.0.0:2380"
+      ETCD_INITIAL_ADVERTISE_PEER_URLS: "http://etcd:2380"
+      ETCD_INITIAL_CLUSTER: "default=http://etcd:2380"
+      ETCD_INITIAL_CLUSTER_STATE: new
+    healthcheck:
+      # etcd 镜像是 distroless（无 shell），用 exec 形式跑 etcdctl
+      test: ["CMD", "etcdctl", "endpoint", "health"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  redis:
+    image: redis:7.2.5-alpine   # 必须 7.x：投递依赖 GETDEL/XAUTOCLAIM
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  mysql:
+    image: mysql:8.0
+    environment:
+      MYSQL_ALLOW_EMPTY_PASSWORD: "yes"
+      MYSQL_DATABASE: myrpc_im
+    volumes:
+      - ./apps/im/common/db/schema.sql:/docker-entrypoint-initdb.d/schema.sql:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  route:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      args: { SERVICE_NAME: route_server }
+    command: ["--etcd.endpoints=http://etcd:2379", "--redis.ip=redis"]
+    depends_on:
+      etcd: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://127.0.0.1:9090/metrics"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 10s
+
+  auth:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      args: { SERVICE_NAME: auth_server }
+    command: ["--etcd.endpoints=http://etcd:2379", "--redis.ip=redis", "--mysql.host=mysql"]
+    depends_on:
+      etcd: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      mysql: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://127.0.0.1:9091/metrics"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 10s
+
+  im:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      args: { SERVICE_NAME: im_server }
+    command:
+      - "--etcd.endpoints=http://etcd:2379"
+      - "--redis.ip=redis"
+      - "--mysql.host=mysql"
+      - "--shared.secret=devsecret123"
+    depends_on:
+      route: { condition: service_healthy }
+      auth: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://127.0.0.1:9092/metrics"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 10s
+
+  gateway:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      args: { SERVICE_NAME: gateway_server }
+    command:
+      - "--etcd.endpoints=http://etcd:2379"
+      - "--shared.secret=devsecret123"
+    ports:
+      - "9000:9000"   # 客户端长连接端口（smoke test 从这进）
+    depends_on:
+      im: { condition: service_healthy }
+      auth: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://127.0.0.1:9093/metrics"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 10s
+
+  deliver:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      args: { SERVICE_NAME: deliver_server }
+    command: ["--etcd.endpoints=http://etcd:2379", "--redis.ip=redis"]
+    depends_on:
+      im: { condition: service_healthy }
+      route: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://127.0.0.1:9094/metrics"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 10s
+
+networks:
+  default:
+    name: myrpc-net

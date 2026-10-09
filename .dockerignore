@@ -1,0 +1,11 @@
+# 构建上下文排除项：只保留源码 + 必要的第三方库
+build/
+.git/
+.github/
+.cache/
+.claude/
+*.log
+spans_*.jsonl
+logs/
+docs/
+compile_commands.json
