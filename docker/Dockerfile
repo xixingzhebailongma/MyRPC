@@ -30,7 +30,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 # 运行时库（非 -dev；abseil/brotli/boost 等作为 grpc/cpprest 的依赖自动带入）
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libgrpc++1 libcpprest2.10 libprotobuf23 libhiredis0.14 \
-        libmysqlclient21 libmysqlcppconn7v5 libssl3 zlib1g libcares2 \
+        libmysqlclient21 libmysqlcppconn7v5 libssl3 zlib1g libc-ares2 \
         curl ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
