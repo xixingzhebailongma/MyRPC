@@ -155,3 +155,5 @@ jobs:
           echo "=== auth 日志（预期崩溃）==="
           docker compose logs auth --no-color || true
           docker compose down -v || true
+      - name: 镜像大小（实测）
+        run: docker images --format '{{.Repository}}:{{.Tag}} {{.Size}}' | sort
