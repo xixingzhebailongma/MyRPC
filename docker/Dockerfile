@@ -11,9 +11,10 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends sudo ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# 依赖（版本钉死，复用 install_deps.sh；先拷脚本再跑，充分利用层缓存）
-COPY scripts/install_deps.sh /tmp/install_deps.sh
-RUN bash /tmp/install_deps.sh
+# 依赖（版本钉死，复用 install_deps.sh；先拷整个 scripts/ 再跑，保持 patches/ 相对结构，
+# 充分利用层缓存）
+COPY scripts/ /tmp/scripts/
+RUN bash /tmp/scripts/install_deps.sh
 
 # 源码 + 编译（一次编出六个二进制；此 RUN 不引用 SERVICE_NAME，跨镜像共享缓存）
 WORKDIR /src
