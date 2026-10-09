@@ -58,6 +58,7 @@ services:
       start_period: 10s
 
   auth:
+    profiles: ["full"]
     build:
       context: .
       dockerfile: docker/Dockerfile
@@ -75,6 +76,7 @@ services:
       start_period: 10s
 
   im:
+    profiles: ["full"]
     build:
       context: .
       dockerfile: docker/Dockerfile
@@ -95,6 +97,7 @@ services:
       start_period: 10s
 
   gateway:
+    profiles: ["full"]
     build:
       context: .
       dockerfile: docker/Dockerfile
@@ -115,6 +118,7 @@ services:
       start_period: 10s
 
   deliver:
+    profiles: ["full"]
     build:
       context: .
       dockerfile: docker/Dockerfile

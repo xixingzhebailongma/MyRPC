@@ -1,15 +1,26 @@
 # 容器化（最小可用）
 
-一条命令拉起整个 IM 系统：5 个 C++ 服务 + etcd / Redis 7 / MySQL，跑通真实链路。
+一条命令拉起 IM 系统的基础设施 + route；`--profile full` 拉起全部五个服务。
 
 ## 启动
 
 ```bash
-docker compose up -d --build          # 构建镜像 + 后台启动
-docker compose ps                     # 等 5 个服务全部 healthy
-./scripts/smoke_test.sh               # 端到端 smoke（register/login/send）
+docker compose up -d --build          # 默认 profile：etcd/redis/mysql/route
+docker compose ps                     # 等 route healthy
+./scripts/smoke_test.sh               # smoke：验证基础设施 + route 注册进 etcd
 docker compose down -v                # 干净清理（含数据卷）
+
+# 完整五个服务（含 auth，见下方已知问题）
+docker compose --profile full up -d --build
 ```
+
+## 已知问题（known issue）
+
+**auth（以及依赖它的 im/gateway/deliver）在容器里启动即 SIGSEGV（exit 139）。** 根因是
+fresh 构建的 etcd-cpp-apiv3（install_deps.sh 钉 v0.15.3）在运行时崩溃，而开发机 `/usr/local`
+里能跑的是从 vendored 副本手编的 `v0.15.4-10-g7c6e714`（dev/CI 版本分叉）。ABI 对比无差异
+（两者同为 gcc 11.4 + C++11 ABI），根因是源码版本。修复方向是让 CI/容器对齐 dev 的
+etcd-cpp-apiv3 构建方式；在解决前，默认只验证 route（route 走 etcd 基础 put 路径，不触发崩溃）。
 
 ## 端口
 

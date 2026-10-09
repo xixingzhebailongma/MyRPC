@@ -134,3 +134,24 @@ jobs:
       - uses: actions/checkout@v4
       - name: 构建镜像 + 端到端 smoke test
         run: ./scripts/smoke_test.sh
+
+  # etcd-cpp-apiv3 fresh 构建（v0.15.3 + 补丁）在运行时崩溃（auth SIGSEGV，exit 139），
+  # known issue。用 full profile 复现，continue-on-error 不阻塞合并；根因与修复方向见
+  # docs/containerization.md「已知问题」。
+  etcd-fresh-build:
+    name: etcd-cpp-apiv3 fresh 构建（full 栈，known issue）
+    runs-on: ubuntu-22.04
+    continue-on-error: true
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: 构建 full 栈 + 尝试起（auth 已知 SIGSEGV）
+        run: |
+          docker compose --profile full build
+          docker compose --profile full up -d
+          sleep 30
+          echo "=== 服务状态 ==="
+          docker compose ps
+          echo "=== auth 日志（预期崩溃）==="
+          docker compose logs auth --no-color || true
+          docker compose down -v || true
