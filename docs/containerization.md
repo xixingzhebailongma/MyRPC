@@ -66,12 +66,16 @@ auth/im/gateway/deliver 的消息链路（它们需 full profile，而 auth 有 
 - **build 阶段**：`install_deps.sh` 装依赖（版本钉死）+ 源码编译六个二进制；该层在六个镜像间共享缓存（一次编译，六份镜像只多各自 `COPY`）。
 - **runtime 阶段**：只装运行时库（`libgrpc++1 libcpprest2.10 libprotobuf23 libhiredis0.14 libmysqlclient21 libmysqlcppconn7v5` 等）+ 拷二进制 + 源码构建的 `libetcd-cpp-api.so` + 非 root 用户。
 
-优化前后（**预估，未实测**——待 CI `etcd-fresh-build` job 的 `docker images` 步骤输出后更新为实测值）：
+优化前后（优化后为 CI 实测，见 `etcd-fresh-build` job 的「镜像大小」步骤）：
 
-| | 镜像内容 | 体积量级 |
+| | 镜像内容 | 体积 |
 |---|---|---|
-| 优化前（单阶段，装 -dev） | build-essential + 全部 -dev 头文件 + 源码 | ~1GB+ |
-| 优化后（多阶段，只运行时库） | 运行时 .so + 二进制 | ~250MB |
+| 优化前（单阶段，装 -dev） | build-essential + 全部 -dev 头文件 + 源码 | ~1GB+（预估，未实测） |
+| 优化后（多阶段，只运行时库） | 运行时 .so + 二进制 | **123~124MB（实测）** |
+
+实测（CI `docker images`）：`myrpc-route` 123MB、`myrpc-auth` 123MB、`myrpc-gateway` 123MB、
+`myrpc-deliver` 123MB、`myrpc-im` 124MB。五个服务镜像体积相近（共享同一 runtime 基础层，
+只差各自二进制）。
 
 > 体积下限由动态依赖决定（grpc + abseil + cpprest + protobuf 本身就重），要再小需静态链接或换传输层，属超出"最小可用"的优化。
 
