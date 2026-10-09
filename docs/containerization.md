@@ -10,17 +10,30 @@ docker compose ps                     # 等 route healthy
 ./scripts/smoke_test.sh               # smoke：验证基础设施 + route 注册进 etcd
 docker compose down -v                # 干净清理（含数据卷）
 
-# 完整五个服务（含 auth，见下方已知问题）
+# 完整五个服务（含 auth，见下方 Known Issues）
 docker compose --profile full up -d --build
 ```
 
-## 已知问题（known issue）
+**smoke 覆盖范围**：`./scripts/smoke_test.sh` 验证默认 profile 的基础设施（etcd/redis/mysql）
+与 route 都能 healthy，且 route 真实注册进 etcd（`/myrpc/services/RouteService/`）。**不覆盖**
+auth/im/gateway/deliver 的消息链路（它们需 full profile，而 auth 有 known issue）。
 
-**auth（以及依赖它的 im/gateway/deliver）在容器里启动即 SIGSEGV（exit 139）。** 根因是
-fresh 构建的 etcd-cpp-apiv3（install_deps.sh 钉 v0.15.3）在运行时崩溃，而开发机 `/usr/local`
-里能跑的是从 vendored 副本手编的 `v0.15.4-10-g7c6e714`（dev/CI 版本分叉）。ABI 对比无差异
-（两者同为 gcc 11.4 + C++11 ABI），根因是源码版本。修复方向是让 CI/容器对齐 dev 的
-etcd-cpp-apiv3 构建方式；在解决前，默认只验证 route（route 走 etcd 基础 put 路径，不触发崩溃）。
+## Known Issues
+
+### etcd-cpp-apiv3 版本分叉（阻塞 full profile 的 auth）
+
+- **根因**：源码版本分叉——dev 能跑的 .so 是 vendored `v0.15.4-10-g7c6e714`，而
+  `install_deps.sh`/CI 钉的是 GitHub `v0.15.3`（+ watch-cancel 补丁）。ABI 对比无差异
+  （同为 gcc 11.4 + C++11 ABI），所以不是 ABI，是版本。
+- **现象**：fresh 构建 + full profile 起 auth 时，auth 启动即 SIGSEGV（exit 139）。
+- **影响范围**：仅 full profile 的 auth（及依赖它的 im/gateway/deliver）；默认 profile
+  （infra+route）不受影响——route 走 etcd 基础 put 路径，不触发崩溃。
+- **现状**：CI 的 `etcd-fresh-build` job（`continue-on-error`）构建 full 栈并复现，作为
+  known issue 跟踪，不阻塞合并。
+- **未做（决策记录）**：不把 dev 的 6MB .so 提交进仓库做止血——进 git 历史后清理成本高，
+  且属于伪绿（只解决"能跑"不解决"版本一致"）。留待长期对齐。
+- **长期方案**：对齐 etcd-cpp-apiv3 源码版本（让 CI/容器照抄 vendored 7c6e714 的构建），或
+  统一 vendored 策略。
 
 ## 端口
 
@@ -55,7 +68,15 @@ etcd-cpp-apiv3 构建方式；在解决前，默认只验证 route（route 走 e
 
 ## CI
 
-`.github/workflows/ci.yml` 的 `container` job 跑 `scripts/smoke_test.sh`（构建镜像 + 端到端验证）。未做 GHCR push（可选，后续加 `docker buildx` + `ghcr.io` 登录即可）。
+`.github/workflows/ci.yml` 里三个 job 的定位：
+
+| job | 定位 |
+|---|---|
+| `container` | 默认 profile 的 docker build + smoke（infra+route），**阻断** |
+| `etcd-fresh-build` | full profile 构建 + 起 auth 复现 SIGSEGV，`continue-on-error`，**跟踪不阻断** |
+| `test` | ASan/UBSan 矩阵 + 单元/E2E 测试（与容器化无关） |
+
+未做 GHCR push（可选，后续加 `docker buildx` + `ghcr.io` 登录即可）。
 
 ## 常见排错
 
