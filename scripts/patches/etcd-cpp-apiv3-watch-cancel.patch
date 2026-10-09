@@ -1,0 +1,16 @@
+diff --git a/src/v3/AsyncGRPC.cpp b/src/v3/AsyncGRPC.cpp
+index 0a8a9d2..aad0858 100644
+--- a/src/v3/AsyncGRPC.cpp
++++ b/src/v3/AsyncGRPC.cpp
+@@ -1326,6 +1326,11 @@ void etcdv3::AsyncWatchAction::CancelWatch() {
+     cancel_req.mutable_cancel_request()->set_watch_id(this->watch_id);
+     stream->Write(cancel_req, (void*) etcdv3::WATCH_WRITE_CANCEL);
+     isCancelled.store(true);
++    // 兜底：etcd 被杀/网络卡死时 gRPC 流可能停在重连，上面那次异步 Write 永远收不到
++    // 完成事件，waitForResponse 就卡死在 cq_.Next()，Wait()/join() 永远不返回。这里
++    // 显式取消 RPC 并关停 completion queue，保证 Next() 立刻返回 false 打断阻塞。
++    context.TryCancel();
++    cq_.Shutdown();
+   }
+ }
+ 

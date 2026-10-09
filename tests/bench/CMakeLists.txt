@@ -13,6 +13,12 @@ target_link_libraries(bench_log_format
     PRIVATE Threads::Threads
 )
 
+add_executable(bench_conn_capacity bench_conn_capacity.cc)
+target_link_libraries(bench_conn_capacity
+    PRIVATE muduo
+    PRIVATE Threads::Threads
+)
+
 add_executable(bench_span_export bench_span_export.cc)
 target_link_libraries(bench_span_export
     PRIVATE rpc_client

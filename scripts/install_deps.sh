@@ -34,17 +34,23 @@ sudo apt-get install -y --no-install-recommends \
 
 # ---- 2. etcd-cpp-apiv3（源码编译，钉 v0.15.3）----
 ETCD_CPP_API_DIR="/tmp/myrpc-ci-deps/etcd-cpp-apiv3"
-if [ ! -f "${ETCD_CPP_API_DIR}/.built" ]; then
+if [ ! -f "${ETCD_CPP_API_DIR}/.built-watchcancel" ]; then
   rm -rf "${ETCD_CPP_API_DIR}"
   git clone --depth 1 --branch "${ETCD_CPP_API_TAG}" \
     https://github.com/etcd-cpp-apiv3/etcd-cpp-apiv3.git "${ETCD_CPP_API_DIR}"
+  # 打补丁：修 Watcher::CancelWatch() 在 etcd 被杀后无法打断 waitForResponse 的挂死
+  # （见 scripts/patches/etcd-cpp-apiv3-watch-cancel.patch 与 memory
+  #  etcdclient-watch-teardown-hang）。补丁后 Cancel() 会 TryCancel + 关停 CQ，保证
+  #  析构 join 不卡死。
+  git -C "${ETCD_CPP_API_DIR}" apply \
+    "$(dirname "$0")/patches/etcd-cpp-apiv3-watch-cancel.patch"
   cmake -S "${ETCD_CPP_API_DIR}" -B "${ETCD_CPP_API_DIR}/build" \
     -DCMAKE_BUILD_TYPE=Release \
     -DBUILD_ETCD_TESTS=OFF \
     -DETCD_W_STRICT=OFF
   cmake --build "${ETCD_CPP_API_DIR}/build" -j"$(nproc)"
   sudo cmake --install "${ETCD_CPP_API_DIR}/build"
-  touch "${ETCD_CPP_API_DIR}/.built"
+  touch "${ETCD_CPP_API_DIR}/.built-watchcancel"
 fi
 
 # ---- 3. etcd 二进制（钉版本，watch 测试自 spawn 单节点）----

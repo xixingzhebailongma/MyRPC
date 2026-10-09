@@ -109,13 +109,12 @@ jobs:
           SAN: ${{ matrix.san }}
         run: cmake --build "build/$SAN" -j"$(nproc)"
 
-      # test_watch_incremental 偶发挂死：EtcdClient 析构 join 卡在 etcd-cpp-apiv3 的
-      # Watcher::Wait()（etcd 被 pkill 后 gRPC 流未干净结束，Cancel() 不可靠）。已知
-      # teardown bug，暂从 CI 排除（TODO：修复 watch 线程可中断性）。
-      - name: 单元测试（排除 3 个 IM E2E + 偶发挂死的 watch 测试）
+      # test_watch_incremental 的 teardown 挂死已修：etcd-cpp-apiv3 打补丁让
+      # Watcher::CancelWatch() 可靠打断 waitForResponse（见 scripts/patches/）。
+      - name: 单元测试（排除 3 个 IM E2E）
         env:
           SAN: ${{ matrix.san }}
-        run: ctest --test-dir "build/$SAN" --output-on-failure --timeout 120 -E 'test_im_e2e|test_im_business|test_im_multi_node|test_watch_incremental'
+        run: ctest --test-dir "build/$SAN" --output-on-failure --timeout 120 -E 'test_im_e2e|test_im_business|test_im_multi_node'
 
       - name: 清理 Redis 投递流
         run: redis-cli -p 6379 DEL im:delivery || true
